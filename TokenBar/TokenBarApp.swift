@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let summaryItem = NSMenuItem(title: "Loading Codex usage…", action: nil, keyEquivalent: "")
+    private let fiveHourLimitItem = NSMenuItem(title: "5-hour: Unavailable", action: nil, keyEquivalent: "")
+    private let weeklyLimitItem = NSMenuItem(title: "Weekly: Unavailable", action: nil, keyEquivalent: "")
     private var iconAnimator: StatusIconAnimator?
     private var monitoringTask: Task<Void, Never>?
     private var snapshot = TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: .now)
@@ -67,9 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         iconAnimator = StatusIconAnimator(button: button)
 
         summaryItem.isEnabled = false
+        fiveHourLimitItem.isEnabled = false
+        weeklyLimitItem.isEnabled = false
 
         let menu = NSMenu()
         menu.addItem(summaryItem)
+        menu.addItem(fiveHourLimitItem)
+        menu.addItem(weeklyLimitItem)
         menu.addItem(.separator())
 
         let refreshItem = NSMenuItem(
@@ -127,6 +133,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         statusItem.button?.toolTip = detail
         summaryItem.title = detail
+        fiveHourLimitItem.title = rateLimitTitle(
+            "5-hour",
+            window: snapshot.fiveHourLimit,
+            includesDate: false
+        )
+        weeklyLimitItem.title = rateLimitTitle(
+            "Weekly",
+            window: snapshot.weeklyLimit,
+            includesDate: true
+        )
+    }
+
+    private func rateLimitTitle(
+        _ label: String,
+        window: CodexRateLimitWindow?,
+        includesDate: Bool
+    ) -> String {
+        guard let window else { return "\(label): Unavailable" }
+
+        guard let resetsAt = window.resetsAt else {
+            return "\(label): \(window.percentLeft)% left"
+        }
+
+        let resetText = includesDate
+            ? resetsAt.formatted(date: .abbreviated, time: .shortened)
+            : resetsAt.formatted(date: .omitted, time: .shortened)
+        return "\(label): \(window.percentLeft)% left — resets \(resetText)"
     }
 
     @objc private func refreshNow() {

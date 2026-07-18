@@ -15,6 +15,53 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(TokenTextFormatter.exact(12_438_219), "12,438,219")
     }
 
+    func testPercentLeftIsClampedAndRounded() {
+        XCTAssertEqual(CodexRateLimitWindow(usedPercent: 17.4, resetsAt: nil).percentLeft, 83)
+        XCTAssertEqual(CodexRateLimitWindow(usedPercent: -1, resetsAt: nil).percentLeft, 100)
+        XCTAssertEqual(CodexRateLimitWindow(usedPercent: 101, resetsAt: nil).percentLeft, 0)
+    }
+
+    func testMapsFiveHourAndWeeklyLimitsByDuration() async throws {
+        let now = Date()
+        let fiveHourReset = now.addingTimeInterval(60 * 60)
+        let weeklyReset = now.addingTimeInterval(4 * 24 * 60 * 60)
+        let home = try makeCodexHome(records: [
+            tokenRecord(
+                at: now,
+                tokens: 500,
+                rateLimits: [
+                    "primary": rateLimitWindow(
+                        usedPercent: 64,
+                        resetsAt: weeklyReset,
+                        windowMinutes: 10_080
+                    ),
+                    "secondary": rateLimitWindow(
+                        usedPercent: 18,
+                        resetsAt: fiveHourReset,
+                        windowMinutes: 300
+                    ),
+                ]
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: CodexMonitor(codexHome: home))
+        let fiveHourLimit = try XCTUnwrap(snapshot.fiveHourLimit)
+        let weeklyLimit = try XCTUnwrap(snapshot.weeklyLimit)
+
+        XCTAssertEqual(fiveHourLimit.percentLeft, 82)
+        XCTAssertEqual(
+            try XCTUnwrap(fiveHourLimit.resetsAt).timeIntervalSince1970,
+            fiveHourReset.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(weeklyLimit.percentLeft, 36)
+        XCTAssertEqual(
+            try XCTUnwrap(weeklyLimit.resetsAt).timeIntervalSince1970,
+            weeklyReset.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+    }
+
     func testCountsOnlyCurrentLocalDayAndReportsWorking() async throws {
         let calendar = Calendar.autoupdatingCurrent
         let now = Date()
@@ -260,27 +307,45 @@ final class CodexMonitorTests: XCTestCase {
     private func tokenRecord(
         at date: Date,
         tokens: Int64,
+        rateLimits: [String: Any]? = nil,
         includesNewline: Bool = true
     ) -> Data {
-        jsonLine(
+        var payload: [String: Any] = [
+            "type": "token_count",
+            "info": [
+                "last_token_usage": [
+                    "input_tokens": tokens - 10,
+                    "cached_input_tokens": tokens - 20,
+                    "output_tokens": 10,
+                    "reasoning_output_tokens": 5,
+                    "total_tokens": tokens,
+                ],
+            ],
+        ]
+        if let rateLimits {
+            payload["rate_limits"] = rateLimits
+        }
+
+        return jsonLine(
             [
                 "timestamp": timestamp(date),
                 "type": "event_msg",
-                "payload": [
-                    "type": "token_count",
-                    "info": [
-                        "last_token_usage": [
-                            "input_tokens": tokens - 10,
-                            "cached_input_tokens": tokens - 20,
-                            "output_tokens": 10,
-                            "reasoning_output_tokens": 5,
-                            "total_tokens": tokens,
-                        ],
-                    ],
-                ],
+                "payload": payload,
             ],
             includesNewline: includesNewline
         )
+    }
+
+    private func rateLimitWindow(
+        usedPercent: Double,
+        resetsAt: Date,
+        windowMinutes: Int64
+    ) -> [String: Any] {
+        [
+            "used_percent": usedPercent,
+            "resets_at": resetsAt.timeIntervalSince1970,
+            "window_minutes": windowMinutes,
+        ]
     }
 
     private func taskRecord(

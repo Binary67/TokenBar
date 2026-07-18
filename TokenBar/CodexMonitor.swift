@@ -34,6 +34,17 @@ struct TokenBarSnapshot: Equatable, Sendable {
     let status: CodexStatus
     let todayTokens: Int64
     let lastUpdated: Date
+    var fiveHourLimit: CodexRateLimitWindow? = nil
+    var weeklyLimit: CodexRateLimitWindow? = nil
+}
+
+struct CodexRateLimitWindow: Equatable, Sendable {
+    let usedPercent: Double
+    let resetsAt: Date?
+
+    var percentLeft: Int {
+        Int(max(0, min(100, 100 - usedPercent)).rounded())
+    }
 }
 
 enum TokenTextFormatter {
@@ -94,6 +105,7 @@ actor CodexMonitor {
         var todayTokens: Int64 = 0
         var activeTurns = Set<String>()
         var latestTerminalEvent: TerminalEvent?
+        var latestRateLimits: RateLimitEvent?
         var modificationDate: Date?
         var fileIdentifier: UInt64?
     }
@@ -101,6 +113,11 @@ actor CodexMonitor {
     private struct TerminalEvent {
         let date: Date
         let isError: Bool
+    }
+
+    private struct RateLimitEvent {
+        let date: Date
+        let snapshot: SessionRecord.RateLimits
     }
 
     private struct SessionRecord: Decodable {
@@ -113,12 +130,31 @@ actor CodexMonitor {
             let turnID: String?
             let reason: String?
             let info: UsageInfo?
+            let rateLimits: RateLimits?
 
             enum CodingKeys: String, CodingKey {
                 case type
                 case turnID = "turn_id"
                 case reason
                 case info
+                case rateLimits = "rate_limits"
+            }
+        }
+
+        struct RateLimits: Decodable {
+            let primary: Window?
+            let secondary: Window?
+
+            struct Window: Decodable {
+                let usedPercent: Double
+                let resetsAt: TimeInterval?
+                let windowMinutes: Int64?
+
+                enum CodingKeys: String, CodingKey {
+                    case usedPercent = "used_percent"
+                    case resetsAt = "resets_at"
+                    case windowMinutes = "window_minutes"
+                }
             }
         }
 
@@ -264,6 +300,10 @@ actor CodexMonitor {
             .compactMap(\.latestTerminalEvent)
             .filter { $0.date >= dayStart && $0.date < dayEnd }
             .max { $0.date < $1.date }
+        let latestRateLimits = fileStates.values
+            .compactMap(\.latestRateLimits)
+            .max { $0.date < $1.date }?
+            .snapshot
 
         let status: CodexStatus
         if hasActiveTurn {
@@ -274,7 +314,28 @@ actor CodexMonitor {
             status = .idle
         }
 
-        return TokenBarSnapshot(status: status, todayTokens: totalTokens, lastUpdated: now)
+        return TokenBarSnapshot(
+            status: status,
+            todayTokens: totalTokens,
+            lastUpdated: now,
+            fiveHourLimit: rateLimitWindow(durationMinutes: 300, in: latestRateLimits),
+            weeklyLimit: rateLimitWindow(durationMinutes: 10_080, in: latestRateLimits)
+        )
+    }
+
+    private func rateLimitWindow(
+        durationMinutes: Int64,
+        in snapshot: SessionRecord.RateLimits?
+    ) -> CodexRateLimitWindow? {
+        let windows = [snapshot?.primary, snapshot?.secondary].compactMap { $0 }
+        guard let window = windows.first(where: { $0.windowMinutes == durationMinutes }) else {
+            return nil
+        }
+
+        return CodexRateLimitWindow(
+            usedPercent: window.usedPercent,
+            resetsAt: window.resetsAt.map(Date.init(timeIntervalSince1970:))
+        )
     }
 
     private func validateCodexStorage() throws {
@@ -389,6 +450,10 @@ actor CodexMonitor {
 
         switch record.payload.type {
         case "token_count":
+            if let rateLimits = record.payload.rateLimits {
+                state.latestRateLimits = RateLimitEvent(date: date, snapshot: rateLimits)
+            }
+
             guard date >= dayInterval.start,
                   date < dayInterval.end,
                   let tokens = record.payload.info?.lastTokenUsage?.totalTokens else {
