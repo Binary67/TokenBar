@@ -19,7 +19,7 @@ enum CodexStatus: String, Sendable {
     var symbolName: String {
         switch self {
         case .working:
-            "circle.fill"
+            "ellipsis.circle.fill"
         case .idle:
             "circle"
         case .error:

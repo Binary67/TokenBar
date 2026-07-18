@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private let fiveHourLimitItem = NSMenuItem(title: "5-hour: Unavailable", action: nil, keyEquivalent: "")
     private let weeklyLimitItem = NSMenuItem(title: "Weekly: Unavailable", action: nil, keyEquivalent: "")
-    private var iconAnimator: StatusIconAnimator?
+    private let iconConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
     private var monitoringTask: Task<Void, Never>?
     private var snapshot = TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: .now)
 
@@ -44,24 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(systemWillSleep),
-            name: NSWorkspace.willSleepNotification,
-            object: nil
-        )
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(accessibilityDisplayOptionsDidChange),
-            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-            object: nil
-        )
         startMonitoring()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitoringTask?.cancel()
-        iconAnimator?.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -71,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.imagePosition = .imageLeft
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = "Loading Codex usage…"
-        iconAnimator = StatusIconAnimator(button: button)
 
         summaryItem.isEnabled = false
         apiEquivalentCostItem.isEnabled = false
@@ -128,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Codex data unavailable"
             : "\(snapshot.status.label) — \(exactTokenText) tokens today"
 
-        iconAnimator?.setStatus(snapshot.status)
+        setStatusIcon(snapshot.status)
 
         statusItem.button?.attributedTitle = NSAttributedString(
             string: tokenText,
@@ -182,6 +168,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "\(label): \(window.percentLeft)% left — resets \(resetText)"
     }
 
+    private func setStatusIcon(_ status: CodexStatus) {
+        guard let button = statusItem.button,
+              let image = NSImage(
+                  systemSymbolName: status.symbolName,
+                  accessibilityDescription: status.label
+              )?.withSymbolConfiguration(iconConfiguration) else {
+            return
+        }
+
+        image.isTemplate = true
+        button.image = image
+        button.setAccessibilityLabel(status.label)
+    }
+
     @objc private func refreshNow() {
         startMonitoring()
     }
@@ -190,124 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startMonitoring()
     }
 
-    @objc private func systemWillSleep() {
-        iconAnimator?.stop()
-    }
-
-    @objc private func accessibilityDisplayOptionsDidChange() {
-        iconAnimator?.refreshAccessibilitySettings()
-    }
-
     @objc private func quit() {
         NSApp.terminate(nil)
-    }
-}
-
-@MainActor
-private final class StatusIconAnimator {
-    private let button: NSStatusBarButton
-    private let configuration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-    private var animationTask: Task<Void, Never>?
-    private var currentStatus: CodexStatus?
-    private lazy var workingFrames = [
-        "MoonWorking01",
-        "MoonWorking02",
-        "MoonWorking03",
-        "MoonWorking04",
-        "MoonWorking05",
-        "MoonWorking06",
-        "MoonWorking07",
-        "MoonWorking08",
-        "MoonWorking09",
-        "MoonWorking10",
-        "MoonWorking11",
-        "MoonWorking12",
-    ].compactMap(assetImage)
-
-    init(button: NSStatusBarButton) {
-        self.button = button
-    }
-
-    func setStatus(_ status: CodexStatus) {
-        guard status != currentStatus else { return }
-
-        animationTask?.cancel()
-        animationTask = nil
-        currentStatus = status
-        button.setAccessibilityLabel(status.label)
-
-        guard status == .working,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            button.image = staticImage(for: status)
-            return
-        }
-
-        let frames = workingFrames
-
-        guard !frames.isEmpty else {
-            button.image = symbolImage(for: status)
-            return
-        }
-
-        let button = button
-        animationTask = Task {
-            var frameIndex = 0
-
-            while !Task.isCancelled {
-                button.image = frames[frameIndex]
-                frameIndex = (frameIndex + 1) % frames.count
-
-                do {
-                    try await Task.sleep(for: .milliseconds(100))
-                } catch {
-                    return
-                }
-            }
-        }
-    }
-
-    func refreshAccessibilitySettings() {
-        guard let currentStatus else { return }
-        self.currentStatus = nil
-        setStatus(currentStatus)
-    }
-
-    func stop() {
-        animationTask?.cancel()
-        animationTask = nil
-        currentStatus = nil
-    }
-
-    private func staticImage(for status: CodexStatus) -> NSImage? {
-        let assetName = switch status {
-        case .working:
-            "MoonWorking01"
-        case .idle:
-            "MoonIdle"
-        case .error:
-            "MoonError"
-        case .unavailable:
-            "MoonUnavailable"
-        }
-
-        return assetImage(named: assetName) ?? symbolImage(for: status)
-    }
-
-    private func assetImage(named name: String) -> NSImage? {
-        guard let image = NSImage(named: name) else { return nil }
-        image.isTemplate = true
-        return image
-    }
-
-    private func symbolImage(for status: CodexStatus) -> NSImage? {
-        guard let image = NSImage(
-            systemSymbolName: status.symbolName,
-            accessibilityDescription: status.label
-        )?.withSymbolConfiguration(configuration) else {
-            return nil
-        }
-
-        image.isTemplate = true
-        return image
     }
 }
