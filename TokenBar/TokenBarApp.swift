@@ -225,7 +225,7 @@ private struct UsagePeriodColumn: View {
                 .foregroundStyle(.secondary)
                 .tracking(0.4)
             Text(UsageValueFormatter.cost(cost))
-                .font(.title2.weight(.semibold))
+                .font(.title3.weight(.semibold))
                 .monospacedDigit()
             Text(isAvailable ? "\(TokenTextFormatter.compact(tokens)) tokens" : "Not reported")
                 .font(.subheadline)
