@@ -190,11 +190,19 @@ private final class StatusIconAnimator {
     private var animationTask: Task<Void, Never>?
     private var currentStatus: CodexStatus?
     private lazy var workingFrames = [
-        "circle",
-        "circle.lefthalf.filled",
-        "circle.fill",
-        "circle.righthalf.filled",
-    ].compactMap { image(named: $0, description: CodexStatus.working.label) }
+        "MoonWorking01",
+        "MoonWorking02",
+        "MoonWorking03",
+        "MoonWorking04",
+        "MoonWorking05",
+        "MoonWorking06",
+        "MoonWorking07",
+        "MoonWorking08",
+        "MoonWorking09",
+        "MoonWorking10",
+        "MoonWorking11",
+        "MoonWorking12",
+    ].compactMap(assetImage)
 
     init(button: NSStatusBarButton) {
         self.button = button
@@ -206,17 +214,18 @@ private final class StatusIconAnimator {
         animationTask?.cancel()
         animationTask = nil
         currentStatus = status
+        button.setAccessibilityLabel(status.label)
 
         guard status == .working,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            button.image = image(named: status.symbolName, description: status.label)
+            button.image = staticImage(for: status)
             return
         }
 
         let frames = workingFrames
 
         guard !frames.isEmpty else {
-            button.image = image(named: status.symbolName, description: status.label)
+            button.image = symbolImage(for: status)
             return
         }
 
@@ -229,7 +238,7 @@ private final class StatusIconAnimator {
                 frameIndex = (frameIndex + 1) % frames.count
 
                 do {
-                    try await Task.sleep(for: .milliseconds(180))
+                    try await Task.sleep(for: .milliseconds(100))
                 } catch {
                     return
                 }
@@ -249,10 +258,31 @@ private final class StatusIconAnimator {
         currentStatus = nil
     }
 
-    private func image(named name: String, description: String) -> NSImage? {
+    private func staticImage(for status: CodexStatus) -> NSImage? {
+        let assetName = switch status {
+        case .working:
+            "MoonWorking01"
+        case .idle:
+            "MoonIdle"
+        case .error:
+            "MoonError"
+        case .unavailable:
+            "MoonUnavailable"
+        }
+
+        return assetImage(named: assetName) ?? symbolImage(for: status)
+    }
+
+    private func assetImage(named name: String) -> NSImage? {
+        guard let image = NSImage(named: name) else { return nil }
+        image.isTemplate = true
+        return image
+    }
+
+    private func symbolImage(for status: CodexStatus) -> NSImage? {
         guard let image = NSImage(
-            systemSymbolName: name,
-            accessibilityDescription: description
+            systemSymbolName: status.symbolName,
+            accessibilityDescription: status.label
         )?.withSymbolConfiguration(configuration) else {
             return nil
         }
