@@ -24,6 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let summaryItem = NSMenuItem(title: "Loading Codex usage…", action: nil, keyEquivalent: "")
+    private let apiEquivalentCostItem = NSMenuItem(
+        title: "API equivalent today: Unavailable",
+        action: nil,
+        keyEquivalent: ""
+    )
     private let fiveHourLimitItem = NSMenuItem(title: "5-hour: Unavailable", action: nil, keyEquivalent: "")
     private let weeklyLimitItem = NSMenuItem(title: "Weekly: Unavailable", action: nil, keyEquivalent: "")
     private var iconAnimator: StatusIconAnimator?
@@ -69,11 +74,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         iconAnimator = StatusIconAnimator(button: button)
 
         summaryItem.isEnabled = false
+        apiEquivalentCostItem.isEnabled = false
+        apiEquivalentCostItem.toolTip = "Estimated using standard OpenAI API prices as of July 18, 2026; excludes codex-auto-review usage; ChatGPT billing may differ."
         fiveHourLimitItem.isEnabled = false
         weeklyLimitItem.isEnabled = false
 
         let menu = NSMenu()
         menu.addItem(summaryItem)
+        menu.addItem(apiEquivalentCostItem)
         menu.addItem(fiveHourLimitItem)
         menu.addItem(weeklyLimitItem)
         menu.addItem(.separator())
@@ -133,6 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         statusItem.button?.toolTip = detail
         summaryItem.title = detail
+        apiEquivalentCostItem.title = apiEquivalentCostTitle(snapshot.estimatedAPICostUSD)
         fiveHourLimitItem.title = rateLimitTitle(
             "5-hour",
             window: snapshot.fiveHourLimit,
@@ -143,6 +152,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window: snapshot.weeklyLimit,
             includesDate: true
         )
+    }
+
+    private func apiEquivalentCostTitle(_ cost: Decimal?) -> String {
+        guard let cost else { return "API equivalent today: Unavailable" }
+
+        let costText = cost.formatted(
+            .currency(code: "USD")
+                .locale(Locale(identifier: "en_US"))
+                .precision(.fractionLength(4))
+        )
+        return "API equivalent today: \(costText)"
     }
 
     private func rateLimitTitle(

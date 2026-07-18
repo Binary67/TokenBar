@@ -21,6 +21,111 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(CodexRateLimitWindow(usedPercent: 101, resetsAt: nil).percentLeft, 0)
     }
 
+    func testCalculatesStandardAPIEquivalentCostForSupportedModels() async throws {
+        let cases = [
+            (model: "gpt-5.6-sol", expectedCost: 0.005725),
+            (model: "gpt-5.6-terra", expectedCost: 0.0028625),
+            (model: "gpt-5.6-luna", expectedCost: 0.001145),
+        ]
+
+        for testCase in cases {
+            let now = Date()
+            let home = try makeCodexHome(records: [
+                modelRecord(testCase.model, at: now),
+                tokenRecord(
+                    at: now.addingTimeInterval(1),
+                    inputTokens: 1_000,
+                    cachedInputTokens: 200,
+                    cacheWriteInputTokens: 100,
+                    outputTokens: 50,
+                    reasoningOutputTokens: 40
+                ),
+            ])
+
+            let snapshot = await firstSnapshot(from: CodexMonitor(codexHome: home))
+
+            XCTAssertEqual(snapshot.todayTokens, 1_050)
+            XCTAssertEqual(try apiCost(from: snapshot), testCase.expectedCost, accuracy: 0.000_000_001)
+        }
+    }
+
+    func testAppliesModelChangesWithinOneSession() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: now),
+            tokenRecord(
+                at: now.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+            modelRecord("gpt-5.6-luna", at: now.addingTimeInterval(2)),
+            tokenRecord(
+                at: now.addingTimeInterval(3),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: CodexMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.todayTokens, 200)
+        XCTAssertEqual(try apiCost(from: snapshot), 0.0006, accuracy: 0.000_000_001)
+    }
+
+    func testMissingOrUnsupportedModelMakesCostUnavailable() async throws {
+        let now = Date()
+        let usage = tokenRecord(
+            at: now.addingTimeInterval(1),
+            inputTokens: 100,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 10
+        )
+        let recordSets = [
+            [usage],
+            [modelRecord("gpt-5.5", at: now), usage],
+        ]
+
+        for records in recordSets {
+            let home = try makeCodexHome(records: records)
+            let snapshot = await firstSnapshot(from: CodexMonitor(codexHome: home))
+
+            XCTAssertEqual(snapshot.todayTokens, 110)
+            XCTAssertNil(snapshot.estimatedAPICostUSD)
+        }
+    }
+
+    func testExcludesAutoReviewUsageFromCost() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: now),
+            tokenRecord(
+                at: now.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+            modelRecord("codex-auto-review", at: now.addingTimeInterval(2)),
+            tokenRecord(
+                at: now.addingTimeInterval(3),
+                inputTokens: 1_000,
+                cachedInputTokens: 200,
+                cacheWriteInputTokens: 100,
+                outputTokens: 50
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: CodexMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.todayTokens, 1_150)
+        XCTAssertEqual(try apiCost(from: snapshot), 0.0005, accuracy: 0.000_000_001)
+    }
+
     func testMapsFiveHourAndWeeklyLimitsByDuration() async throws {
         let now = Date()
         let fiveHourReset = now.addingTimeInterval(60 * 60)
@@ -68,6 +173,7 @@ final class CodexMonitorTests: XCTestCase {
         let dayStart = calendar.startOfDay(for: now)
         let tomorrow = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: dayStart))
         let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: dayStart.addingTimeInterval(-2)),
             tokenRecord(at: dayStart.addingTimeInterval(-1), tokens: 900),
             Data("not json\n".utf8),
             tokenRecord(at: dayStart.addingTimeInterval(60), tokens: 1_234),
@@ -79,6 +185,7 @@ final class CodexMonitorTests: XCTestCase {
 
         XCTAssertEqual(snapshot.todayTokens, 1_234)
         XCTAssertEqual(snapshot.status, .working)
+        XCTAssertEqual(try apiCost(from: snapshot), 0.000957, accuracy: 0.000_000_001)
     }
 
     func testInterruptedTurnIsIdleAndFailedTurnIsError() async throws {
@@ -149,10 +256,13 @@ final class CodexMonitorTests: XCTestCase {
     }
 
     func testPartialLineAndRepeatedPollingDoNotDoubleCount() async throws {
-        let home = try makeCodexHome(records: [])
+        let home = try makeCodexHome(records: [modelRecord("gpt-5.6-sol", at: Date())])
         let rolloutURL = home.appendingPathComponent("sessions/rollout.jsonl")
         let record = tokenRecord(at: Date(), tokens: 500, includesNewline: false)
-        try record.write(to: rolloutURL)
+        let recordHandle = try FileHandle(forWritingTo: rolloutURL)
+        try recordHandle.seekToEnd()
+        try recordHandle.write(contentsOf: record)
+        try recordHandle.close()
 
         let monitor = CodexMonitor(codexHome: home, pollInterval: .milliseconds(20))
         let initial = expectation(description: "Initial partial line is ignored")
@@ -160,14 +270,19 @@ final class CodexMonitorTests: XCTestCase {
         updated.expectedFulfillmentCount = 2
         var sawInitial = false
         var updatedValues = [Int64]()
+        var updatedCosts = [Decimal]()
 
         let task = Task {
             await monitor.run { snapshot in
                 if !sawInitial, snapshot.todayTokens == 0 {
                     sawInitial = true
                     initial.fulfill()
-                } else if sawInitial, snapshot.todayTokens == 500, updatedValues.count < 2 {
+                } else if sawInitial,
+                          snapshot.todayTokens == 500,
+                          let cost = snapshot.estimatedAPICostUSD,
+                          updatedValues.count < 2 {
                     updatedValues.append(snapshot.todayTokens)
+                    updatedCosts.append(cost)
                     updated.fulfill()
                 }
             }
@@ -182,31 +297,58 @@ final class CodexMonitorTests: XCTestCase {
         task.cancel()
 
         XCTAssertEqual(updatedValues, [500, 500])
+        XCTAssertEqual(
+            updatedCosts.map { NSDecimalNumber(decimal: $0).doubleValue },
+            [0.00059, 0.00059]
+        )
     }
 
     func testReplacingSessionFileRebuildsItsSubtotal() async throws {
-        let home = try makeCodexHome(records: [tokenRecord(at: Date(), tokens: 100)])
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: now),
+            tokenRecord(at: now.addingTimeInterval(1), tokens: 100),
+        ])
         let rolloutURL = home.appendingPathComponent("sessions/rollout.jsonl")
         let monitor = CodexMonitor(codexHome: home, pollInterval: .milliseconds(20))
         let initial = expectation(description: "Initial total")
         let replaced = expectation(description: "Replacement total")
         var didReplace = false
+        var sawReplacement = false
+        var initialCost: Decimal?
+        var replacementCost: Decimal?
 
         let task = Task {
             await monitor.run { snapshot in
                 if snapshot.todayTokens == 100, !didReplace {
                     didReplace = true
+                    initialCost = snapshot.estimatedAPICostUSD
                     initial.fulfill()
-                } else if snapshot.todayTokens == 250 {
+                } else if snapshot.todayTokens == 250, !sawReplacement {
+                    sawReplacement = true
+                    replacementCost = snapshot.estimatedAPICostUSD
                     replaced.fulfill()
                 }
             }
         }
 
         await fulfillment(of: [initial], timeout: 2)
-        try tokenRecord(at: Date(), tokens: 250).write(to: rolloutURL, options: .atomic)
+        var replacement = modelRecord("gpt-5.6-sol", at: Date())
+        replacement.append(tokenRecord(at: Date().addingTimeInterval(1), tokens: 250))
+        try replacement.write(to: rolloutURL, options: .atomic)
         await fulfillment(of: [replaced], timeout: 2)
         task.cancel()
+
+        XCTAssertEqual(
+            NSDecimalNumber(decimal: try XCTUnwrap(initialCost)).doubleValue,
+            0.00039,
+            accuracy: 0.000_000_001
+        )
+        XCTAssertEqual(
+            NSDecimalNumber(decimal: try XCTUnwrap(replacementCost)).doubleValue,
+            0.000465,
+            accuracy: 0.000_000_001
+        )
     }
 
     func testMissingCodexStorageIsUnavailable() async throws {
@@ -219,6 +361,11 @@ final class CodexMonitorTests: XCTestCase {
 
         XCTAssertEqual(snapshot.status, .unavailable)
         XCTAssertEqual(snapshot.todayTokens, 0)
+        XCTAssertNil(snapshot.estimatedAPICostUSD)
+    }
+
+    private func apiCost(from snapshot: TokenBarSnapshot) throws -> Double {
+        NSDecimalNumber(decimal: try XCTUnwrap(snapshot.estimatedAPICostUSD)).doubleValue
     }
 
     private func firstSnapshot(from monitor: CodexMonitor) async -> TokenBarSnapshot {
@@ -310,15 +457,38 @@ final class CodexMonitorTests: XCTestCase {
         rateLimits: [String: Any]? = nil,
         includesNewline: Bool = true
     ) -> Data {
+        tokenRecord(
+            at: date,
+            inputTokens: tokens - 10,
+            cachedInputTokens: tokens - 20,
+            cacheWriteInputTokens: 0,
+            outputTokens: 10,
+            reasoningOutputTokens: 5,
+            rateLimits: rateLimits,
+            includesNewline: includesNewline
+        )
+    }
+
+    private func tokenRecord(
+        at date: Date,
+        inputTokens: Int64,
+        cachedInputTokens: Int64,
+        cacheWriteInputTokens: Int64,
+        outputTokens: Int64,
+        reasoningOutputTokens: Int64 = 0,
+        rateLimits: [String: Any]? = nil,
+        includesNewline: Bool = true
+    ) -> Data {
         var payload: [String: Any] = [
             "type": "token_count",
             "info": [
                 "last_token_usage": [
-                    "input_tokens": tokens - 10,
-                    "cached_input_tokens": tokens - 20,
-                    "output_tokens": 10,
-                    "reasoning_output_tokens": 5,
-                    "total_tokens": tokens,
+                    "input_tokens": inputTokens,
+                    "cached_input_tokens": cachedInputTokens,
+                    "cache_write_input_tokens": cacheWriteInputTokens,
+                    "output_tokens": outputTokens,
+                    "reasoning_output_tokens": reasoningOutputTokens,
+                    "total_tokens": inputTokens + outputTokens,
                 ],
             ],
         ]
@@ -334,6 +504,14 @@ final class CodexMonitorTests: XCTestCase {
             ],
             includesNewline: includesNewline
         )
+    }
+
+    private func modelRecord(_ model: String, at date: Date) -> Data {
+        jsonLine([
+            "timestamp": timestamp(date),
+            "type": "turn_context",
+            "payload": ["model": model],
+        ])
     }
 
     private func rateLimitWindow(

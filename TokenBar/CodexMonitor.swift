@@ -36,6 +36,7 @@ struct TokenBarSnapshot: Equatable, Sendable {
     let lastUpdated: Date
     var fiveHourLimit: CodexRateLimitWindow? = nil
     var weeklyLimit: CodexRateLimitWindow? = nil
+    var estimatedAPICostUSD: Decimal? = nil
 }
 
 struct CodexRateLimitWindow: Equatable, Sendable {
@@ -103,6 +104,9 @@ actor CodexMonitor {
         var offset: UInt64 = 0
         var trailingData = Data()
         var todayTokens: Int64 = 0
+        var todayAPICostUSD = Decimal.zero
+        var hasUnpricedTodayUsage = false
+        var currentModelID: String?
         var activeTurns = Set<String>()
         var latestTerminalEvent: TerminalEvent?
         var latestRateLimits: RateLimitEvent?
@@ -118,6 +122,53 @@ actor CodexMonitor {
     private struct RateLimitEvent {
         let date: Date
         let snapshot: SessionRecord.RateLimits
+    }
+
+    // Standard API prices per 1M tokens as of July 18, 2026.
+    // https://platform.openai.com/docs/pricing
+    private enum PricedModel: String {
+        case sol = "gpt-5.6-sol"
+        case terra = "gpt-5.6-terra"
+        case luna = "gpt-5.6-luna"
+
+        var rates: APIRates {
+            switch self {
+            case .sol:
+                APIRates(input: 5, cachedInput: 0.5, cacheWriteInput: 6.25, output: 30)
+            case .terra:
+                APIRates(input: 2.5, cachedInput: 0.25, cacheWriteInput: 3.125, output: 15)
+            case .luna:
+                APIRates(input: 1, cachedInput: 0.1, cacheWriteInput: 1.25, output: 6)
+            }
+        }
+
+        func cost(for usage: SessionRecord.TokenUsage) -> Decimal {
+            let regularInputTokens = usage.inputTokens
+                - usage.cachedInputTokens
+                - usage.cacheWriteInputTokens
+            let rates = rates
+            let costPerMillion = Decimal(regularInputTokens) * rates.input
+                + Decimal(usage.cachedInputTokens) * rates.cachedInput
+                + Decimal(usage.cacheWriteInputTokens) * rates.cacheWriteInput
+                + Decimal(usage.outputTokens) * rates.output
+            return costPerMillion / 1_000_000
+        }
+    }
+
+    private struct APIRates {
+        let input: Decimal
+        let cachedInput: Decimal
+        let cacheWriteInput: Decimal
+        let output: Decimal
+    }
+
+    private struct TurnContextRecord: Decodable {
+        let type: String
+        let payload: Payload
+
+        struct Payload: Decodable {
+            let model: String
+        }
     }
 
     private struct SessionRecord: Decodable {
@@ -167,9 +218,17 @@ actor CodexMonitor {
         }
 
         struct TokenUsage: Decodable {
+            let inputTokens: Int64
+            let cachedInputTokens: Int64
+            let cacheWriteInputTokens: Int64
+            let outputTokens: Int64
             let totalTokens: Int64
 
             enum CodingKeys: String, CodingKey {
+                case inputTokens = "input_tokens"
+                case cachedInputTokens = "cached_input_tokens"
+                case cacheWriteInputTokens = "cache_write_input_tokens"
+                case outputTokens = "output_tokens"
                 case totalTokens = "total_tokens"
             }
         }
@@ -304,6 +363,12 @@ actor CodexMonitor {
             .compactMap(\.latestRateLimits)
             .max { $0.date < $1.date }?
             .snapshot
+        let hasUnpricedTodayUsage = fileStates.values.contains { $0.hasUnpricedTodayUsage }
+        let estimatedAPICostUSD = hasUnpricedTodayUsage ? nil : fileStates.values.reduce(
+            Decimal.zero
+        ) { total, state in
+            total + state.todayAPICostUSD
+        }
 
         let status: CodexStatus
         if hasActiveTurn {
@@ -319,7 +384,8 @@ actor CodexMonitor {
             todayTokens: totalTokens,
             lastUpdated: now,
             fiveHourLimit: rateLimitWindow(durationMinutes: 300, in: latestRateLimits),
-            weeklyLimit: rateLimitWindow(durationMinutes: 10_080, in: latestRateLimits)
+            weeklyLimit: rateLimitWindow(durationMinutes: 10_080, in: latestRateLimits),
+            estimatedAPICostUSD: estimatedAPICostUSD
         )
     }
 
@@ -441,6 +507,13 @@ actor CodexMonitor {
     }
 
     private func process(line: Data, dayInterval: DateInterval, state: inout SessionFileState) {
+        if line.range(of: Data(#""type":"turn_context""#.utf8)) != nil,
+           let record = try? decoder.decode(TurnContextRecord.self, from: line),
+           record.type == "turn_context" {
+            state.currentModelID = record.payload.model
+            return
+        }
+
         guard containsRelevantEvent(in: line),
               let record = try? decoder.decode(SessionRecord.self, from: line),
               record.type == "event_msg",
@@ -456,10 +529,25 @@ actor CodexMonitor {
 
             guard date >= dayInterval.start,
                   date < dayInterval.end,
-                  let tokens = record.payload.info?.lastTokenUsage?.totalTokens else {
+                  let usage = record.payload.info?.lastTokenUsage else {
                 return
             }
-            state.todayTokens += tokens
+            state.todayTokens += usage.totalTokens
+
+            guard let currentModelID = state.currentModelID else {
+                state.hasUnpricedTodayUsage = true
+                return
+            }
+
+            if currentModelID == "codex-auto-review" {
+                return
+            }
+
+            guard let model = PricedModel(rawValue: currentModelID) else {
+                state.hasUnpricedTodayUsage = true
+                return
+            }
+            state.todayAPICostUSD += model.cost(for: usage)
 
         case "task_started":
             guard let turnID = record.payload.turnID else { return }
