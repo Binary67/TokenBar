@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let summaryItem = NSMenuItem(title: "Loading Codex usage…", action: nil, keyEquivalent: "")
+    private var iconAnimator: StatusIconAnimator?
     private var monitoringTask: Task<Void, Never>?
     private var snapshot = TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: .now)
 
@@ -36,11 +37,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
         startMonitoring()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitoringTask?.cancel()
+        iconAnimator?.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -50,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.imagePosition = .imageLeft
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = "Loading Codex usage…"
+        iconAnimator = StatusIconAnimator(button: button)
 
         summaryItem.isEnabled = false
 
@@ -99,15 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Codex data unavailable"
             : "\(snapshot.status.label) — \(exactTokenText) tokens today"
 
-        if let image = NSImage(
-            systemSymbolName: snapshot.status.symbolName,
-            accessibilityDescription: snapshot.status.label
-        ) {
-            image.isTemplate = true
-            statusItem.button?.image = image.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            )
-        }
+        iconAnimator?.setStatus(snapshot.status)
 
         statusItem.button?.attributedTitle = NSAttributedString(
             string: tokenText,
@@ -130,7 +137,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startMonitoring()
     }
 
+    @objc private func systemWillSleep() {
+        iconAnimator?.stop()
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        iconAnimator?.refreshAccessibilitySettings()
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+}
+
+@MainActor
+private final class StatusIconAnimator {
+    private let button: NSStatusBarButton
+    private let configuration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+    private var animationTask: Task<Void, Never>?
+    private var currentStatus: CodexStatus?
+    private lazy var workingFrames = [
+        "circle",
+        "circle.lefthalf.filled",
+        "circle.fill",
+        "circle.righthalf.filled",
+    ].compactMap { image(named: $0, description: CodexStatus.working.label) }
+
+    init(button: NSStatusBarButton) {
+        self.button = button
+    }
+
+    func setStatus(_ status: CodexStatus) {
+        guard status != currentStatus else { return }
+
+        animationTask?.cancel()
+        animationTask = nil
+        currentStatus = status
+
+        guard status == .working,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            button.image = image(named: status.symbolName, description: status.label)
+            return
+        }
+
+        let frames = workingFrames
+
+        guard !frames.isEmpty else {
+            button.image = image(named: status.symbolName, description: status.label)
+            return
+        }
+
+        let button = button
+        animationTask = Task {
+            var frameIndex = 0
+
+            while !Task.isCancelled {
+                button.image = frames[frameIndex]
+                frameIndex = (frameIndex + 1) % frames.count
+
+                do {
+                    try await Task.sleep(for: .milliseconds(180))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    func refreshAccessibilitySettings() {
+        guard let currentStatus else { return }
+        self.currentStatus = nil
+        setStatus(currentStatus)
+    }
+
+    func stop() {
+        animationTask?.cancel()
+        animationTask = nil
+        currentStatus = nil
+    }
+
+    private func image(named name: String, description: String) -> NSImage? {
+        guard let image = NSImage(
+            systemSymbolName: name,
+            accessibilityDescription: description
+        )?.withSymbolConfiguration(configuration) else {
+            return nil
+        }
+
+        image.isTemplate = true
+        return image
     }
 }
