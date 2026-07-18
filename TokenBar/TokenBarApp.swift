@@ -24,8 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let usageOverviewItem = NSMenuItem()
-    private let fiveHourLimitItem = NSMenuItem(title: "5-hour: Unavailable", action: nil, keyEquivalent: "")
-    private let weeklyLimitItem = NSMenuItem(title: "Weekly: Unavailable", action: nil, keyEquivalent: "")
     private let iconConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
     private var usageOverviewHostingView: NSHostingView<UsageOverviewView>?
     private var monitoringTask: Task<Void, Never>?
@@ -55,21 +53,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = "Loading Codex usage…"
 
-        fiveHourLimitItem.isEnabled = false
-        weeklyLimitItem.isEnabled = false
-
         let overviewHostingView = NSHostingView(
             rootView: UsageOverviewView(snapshot: snapshot)
         )
-        overviewHostingView.frame = NSRect(x: 0, y: 0, width: 360, height: 258)
+        overviewHostingView.frame.size = overviewHostingView.fittingSize
         usageOverviewItem.view = overviewHostingView
         usageOverviewHostingView = overviewHostingView
 
         let menu = NSMenu()
         menu.addItem(usageOverviewItem)
-        menu.addItem(.separator())
-        menu.addItem(fiveHourLimitItem)
-        menu.addItem(weeklyLimitItem)
         menu.addItem(.separator())
 
         let refreshItem = NSMenuItem(
@@ -126,34 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ]
         )
         statusItem.button?.toolTip = detail
-        usageOverviewHostingView?.rootView = UsageOverviewView(snapshot: snapshot)
-        fiveHourLimitItem.title = rateLimitTitle(
-            "5-hour",
-            window: snapshot.fiveHourLimit,
-            includesDate: false
-        )
-        weeklyLimitItem.title = rateLimitTitle(
-            "Weekly",
-            window: snapshot.weeklyLimit,
-            includesDate: true
-        )
-    }
-
-    private func rateLimitTitle(
-        _ label: String,
-        window: CodexRateLimitWindow?,
-        includesDate: Bool
-    ) -> String {
-        guard let window else { return "\(label): Unavailable" }
-
-        guard let resetsAt = window.resetsAt else {
-            return "\(label): \(window.percentLeft)% left"
+        if let usageOverviewHostingView {
+            usageOverviewHostingView.rootView = UsageOverviewView(snapshot: snapshot)
+            usageOverviewHostingView.frame.size = usageOverviewHostingView.fittingSize
         }
-
-        let resetText = includesDate
-            ? resetsAt.formatted(date: .abbreviated, time: .shortened)
-            : resetsAt.formatted(date: .omitted, time: .shortened)
-        return "\(label): \(window.percentLeft)% left — resets \(resetText)"
     }
 
     private func setStatusIcon(_ status: CodexStatus) {
@@ -187,31 +155,33 @@ private struct UsageOverviewView: View {
     let snapshot: TokenBarSnapshot
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text("Sol, Terra & Luna")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                Text("Codex Usage")
+                    .font(.headline)
                 Spacer()
-                Text(snapshot.status.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(snapshot.status.indicatorColor)
+                        .frame(width: 6, height: 6)
+                    Text(snapshot.status.label)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Divider()
 
             HStack(alignment: .top, spacing: 24) {
-                UsageMetricColumn(
-                    costLabel: "Today cost",
+                UsagePeriodColumn(
+                    title: "Today",
                     cost: snapshot.estimatedAPICostUSD,
-                    tokenLabel: "Today tokens",
                     tokens: snapshot.trackedTodayTokens,
                     isAvailable: snapshot.status != .unavailable
                 )
-                UsageMetricColumn(
-                    costLabel: "Last 30 days cost",
+                UsagePeriodColumn(
+                    title: "Last 30 days",
                     cost: snapshot.last30DaysAPICostUSD,
-                    tokenLabel: "Last 30 days tokens",
                     tokens: snapshot.last30DaysTokens,
                     isAvailable: snapshot.status != .unavailable
                 )
@@ -219,54 +189,47 @@ private struct UsageOverviewView: View {
 
             StackedUsageChart(days: snapshot.dailyUsage)
 
-            HStack(spacing: 12) {
-                ForEach(CodexTrackedModel.allCases, id: \.rawValue) { model in
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(model.chartColor)
-                            .frame(width: 7, height: 7)
-                        Text(model.label)
-                    }
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            Divider()
 
-            Text("API-equivalent estimate · other models excluded")
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .help(
-                    "Estimated using standard OpenAI API prices as of July 18, 2026; "
-                        + "ChatGPT billing may differ."
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Usage limits")
+                    .font(.caption.weight(.medium))
+                RateLimitRow(
+                    label: "5-hour",
+                    window: snapshot.fiveHourLimit,
+                    includesDate: false
                 )
+                RateLimitRow(
+                    label: "Weekly",
+                    window: snapshot.weeklyLimit,
+                    includesDate: true
+                )
+            }
         }
-        .padding(12)
-        .frame(width: 360, height: 258, alignment: .topLeading)
+        .padding(14)
+        .frame(width: 340, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-private struct UsageMetricColumn: View {
-    let costLabel: String
+private struct UsagePeriodColumn: View {
+    let title: String
     let cost: Decimal?
-    let tokenLabel: String
     let tokens: Int64
     let isAvailable: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(costLabel)
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .tracking(0.4)
             Text(UsageValueFormatter.cost(cost))
-                .font(.system(size: 19, weight: .semibold, design: .rounded))
+                .font(.title2.weight(.semibold))
                 .monospacedDigit()
-
-            Text(tokenLabel)
-                .font(.caption)
+            Text(isAvailable ? "\(TokenTextFormatter.compact(tokens)) tokens" : "Not reported")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .padding(.top, 4)
-            Text(isAvailable ? TokenTextFormatter.compact(tokens) : "Unavailable")
-                .font(.system(size: 19, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .help(isAvailable ? "\(TokenTextFormatter.exact(tokens)) tokens" : "")
         }
@@ -276,24 +239,51 @@ private struct UsageMetricColumn: View {
 
 private struct StackedUsageChart: View {
     let days: [CodexDailyUsage]
+    @State private var hoveredDay: CodexDailyUsage?
 
-    private let chartHeight: CGFloat = 58
+    private let chartHeight: CGFloat = 44
+
+    private var maximumTokens: Int64 {
+        days.map(\.totalTokens).max() ?? 0
+    }
 
     var body: some View {
-        VStack(spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Text("Daily tokens")
+                    .font(.caption.weight(.medium))
+                Spacer()
+                Text(chartSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             if days.isEmpty {
-                Text("Usage history unavailable")
+                Text("No history reported")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: chartHeight)
             } else {
-                HStack(alignment: .bottom, spacing: 3) {
-                    ForEach(days) { day in
-                        DailyUsageBar(
-                            usage: day,
-                            maximumTokens: days.map(\.totalTokens).max() ?? 0,
-                            chartHeight: chartHeight
-                        )
+                ZStack(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.16))
+                        .frame(height: 1)
+
+                    HStack(alignment: .bottom, spacing: 3) {
+                        ForEach(days) { day in
+                            DailyUsageBar(
+                                usage: day,
+                                maximumTokens: maximumTokens,
+                                chartHeight: chartHeight,
+                                isHovered: hoveredDay?.id == day.id
+                            ) { isHovering in
+                                if isHovering {
+                                    hoveredDay = day
+                                } else if hoveredDay?.id == day.id {
+                                    hoveredDay = nil
+                                }
+                            }
+                        }
                     }
                 }
                 .frame(height: chartHeight, alignment: .bottom)
@@ -306,7 +296,31 @@ private struct StackedUsageChart: View {
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
             }
+
+            HStack(spacing: 12) {
+                ForEach(CodexTrackedModel.allCases, id: \.rawValue) { model in
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(model.chartColor)
+                            .frame(width: 6, height: 6)
+                        Text(model.label)
+                    }
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
+    }
+
+    private var chartSummary: String {
+        guard let hoveredDay else {
+            return UsageValueFormatter.dateRange(days)
+        }
+
+        let date = hoveredDay.day.formatted(
+            .dateTime.month(.abbreviated).day()
+        )
+        return "\(date) · \(UsageValueFormatter.cost(hoveredDay.estimatedAPICostUSD))"
     }
 }
 
@@ -314,9 +328,11 @@ private struct DailyUsageBar: View {
     let usage: CodexDailyUsage
     let maximumTokens: Int64
     let chartHeight: CGFloat
+    let isHovered: Bool
+    let onHover: (Bool) -> Void
 
     private var barHeight: CGFloat {
-        guard maximumTokens > 0, usage.totalTokens > 0 else { return 1 }
+        guard maximumTokens > 0, usage.totalTokens > 0 else { return 0 }
         return max(2, CGFloat(Double(usage.totalTokens) / Double(maximumTokens)) * chartHeight)
     }
 
@@ -336,10 +352,11 @@ private struct DailyUsageBar: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: barHeight, alignment: .bottom)
-        .background(usage.totalTokens == 0 ? Color.secondary.opacity(0.16) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 2))
+        .brightness(isHovered ? 0.12 : 0)
         .frame(height: chartHeight, alignment: .bottom)
-        .help(tooltip)
+        .contentShape(Rectangle())
+        .onHover(perform: onHover)
         .accessibilityLabel(tooltip)
     }
 
@@ -347,6 +364,7 @@ private struct DailyUsageBar: View {
         var lines = [
             usage.day.formatted(date: .abbreviated, time: .omitted),
             "Total: \(TokenTextFormatter.exact(usage.totalTokens)) tokens",
+            "API equivalent: \(UsageValueFormatter.cost(usage.estimatedAPICostUSD))",
         ]
         for model in CodexTrackedModel.allCases {
             let modelUsage = usage.usage(for: model)
@@ -359,9 +377,38 @@ private struct DailyUsageBar: View {
     }
 }
 
+private struct RateLimitRow: View {
+    let label: String
+    let window: CodexRateLimitWindow?
+    let includesDate: Bool
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(detail)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .font(.caption)
+    }
+
+    private var detail: String {
+        guard let window else { return "Not reported" }
+        guard let resetsAt = window.resetsAt else {
+            return "\(window.percentLeft)% left"
+        }
+
+        let resetText = includesDate
+            ? resetsAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+            : resetsAt.formatted(.dateTime.hour().minute())
+        return "\(window.percentLeft)% left · \(resetText)"
+    }
+}
+
 private enum UsageValueFormatter {
     static func cost(_ cost: Decimal?) -> String {
-        guard let cost else { return "Unavailable" }
+        guard let cost else { return "Not reported" }
         let decimals = cost < 1 ? 4 : 2
         return cost.formatted(
             .currency(code: "USD")
@@ -369,17 +416,38 @@ private enum UsageValueFormatter {
                 .precision(.fractionLength(decimals))
         )
     }
+
+    static func dateRange(_ days: [CodexDailyUsage]) -> String {
+        guard let first = days.first?.day, let last = days.last?.day else { return "" }
+        let style = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        return "\(first.formatted(style)) – \(last.formatted(style))"
+    }
 }
 
 private extension CodexTrackedModel {
     var chartColor: Color {
         switch self {
         case .sol:
-            Color(red: 0.18, green: 0.61, blue: 0.82)
+            .blue
         case .terra:
-            Color(red: 0.58, green: 0.42, blue: 0.82)
+            .indigo
         case .luna:
-            Color(red: 0.26, green: 0.70, blue: 0.50)
+            .mint
+        }
+    }
+}
+
+private extension CodexStatus {
+    var indicatorColor: Color {
+        switch self {
+        case .working:
+            .blue
+        case .idle:
+            .secondary
+        case .error:
+            .red
+        case .unavailable:
+            .orange
         }
     }
 }
