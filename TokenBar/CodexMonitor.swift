@@ -12,7 +12,7 @@ enum CodexStatus: String, Sendable {
     case error
     case unavailable
 
-    var label: String {
+    nonisolated var label: String {
         rawValue.capitalized
     }
 
@@ -37,6 +37,84 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var fiveHourLimit: CodexRateLimitWindow? = nil
     var weeklyLimit: CodexRateLimitWindow? = nil
     var estimatedAPICostUSD: Decimal? = nil
+    var trackedTodayTokens: Int64 = 0
+    var last30DaysTokens: Int64 = 0
+    var last30DaysAPICostUSD: Decimal? = nil
+    var dailyUsage: [CodexDailyUsage] = []
+}
+
+enum CodexTrackedModel: String, CaseIterable, Codable, Sendable {
+    case sol = "gpt-5.6-sol"
+    case terra = "gpt-5.6-terra"
+    case luna = "gpt-5.6-luna"
+
+    var label: String {
+        rawValue
+            .replacingOccurrences(of: "gpt-5.6-", with: "")
+            .capitalized
+    }
+}
+
+struct CodexModelUsage: Codable, Equatable, Sendable {
+    var tokens: Int64 = 0
+    var estimatedAPICostUSD = Decimal.zero
+}
+
+struct CodexDailyUsage: Codable, Equatable, Identifiable, Sendable {
+    let day: Date
+    var sol = CodexModelUsage()
+    var terra = CodexModelUsage()
+    var luna = CodexModelUsage()
+
+    nonisolated var id: Date { day }
+
+    nonisolated var totalTokens: Int64 {
+        sol.tokens + terra.tokens + luna.tokens
+    }
+
+    nonisolated var estimatedAPICostUSD: Decimal {
+        sol.estimatedAPICostUSD
+            + terra.estimatedAPICostUSD
+            + luna.estimatedAPICostUSD
+    }
+
+    nonisolated func usage(for model: CodexTrackedModel) -> CodexModelUsage {
+        switch model {
+        case .sol:
+            sol
+        case .terra:
+            terra
+        case .luna:
+            luna
+        }
+    }
+
+    nonisolated mutating func add(
+        tokens: Int64,
+        cost: Decimal,
+        for model: CodexTrackedModel
+    ) {
+        switch model {
+        case .sol:
+            sol.tokens += tokens
+            sol.estimatedAPICostUSD += cost
+        case .terra:
+            terra.tokens += tokens
+            terra.estimatedAPICostUSD += cost
+        case .luna:
+            luna.tokens += tokens
+            luna.estimatedAPICostUSD += cost
+        }
+    }
+
+    nonisolated mutating func add(_ usage: CodexDailyUsage) {
+        sol.tokens += usage.sol.tokens
+        sol.estimatedAPICostUSD += usage.sol.estimatedAPICostUSD
+        terra.tokens += usage.terra.tokens
+        terra.estimatedAPICostUSD += usage.terra.estimatedAPICostUSD
+        luna.tokens += usage.luna.tokens
+        luna.estimatedAPICostUSD += usage.luna.estimatedAPICostUSD
+    }
 }
 
 struct CodexRateLimitWindow: Equatable, Sendable {
@@ -100,12 +178,11 @@ enum TokenTextFormatter {
 actor CodexMonitor {
     typealias SnapshotHandler = @MainActor @Sendable (TokenBarSnapshot) -> Void
 
-    private struct SessionFileState {
+    private struct SessionFileState: Codable {
         var offset: UInt64 = 0
         var trailingData = Data()
-        var todayTokens: Int64 = 0
-        var todayAPICostUSD = Decimal.zero
-        var hasUnpricedTodayUsage = false
+        var allTokensByDay = [Date: Int64]()
+        var dailyUsage = [Date: CodexDailyUsage]()
         var currentModelID: String?
         var activeTurns = Set<String>()
         var latestTerminalEvent: TerminalEvent?
@@ -114,45 +191,54 @@ actor CodexMonitor {
         var fileIdentifier: UInt64?
     }
 
-    private struct TerminalEvent {
+    private struct TerminalEvent: Codable {
         let date: Date
         let isError: Bool
     }
 
-    private struct RateLimitEvent {
+    private struct RateLimitEvent: Codable {
         let date: Date
         let snapshot: SessionRecord.RateLimits
     }
 
+    private struct UsageCache: Codable {
+        let version: Int
+        let codexHomePath: String
+        let timeZoneIdentifier: String
+        let files: [CachedSessionFile]
+    }
+
+    private struct CachedSessionFile: Codable {
+        let path: String
+        let state: SessionFileState
+    }
+
     // Standard API prices per 1M tokens as of July 18, 2026.
     // https://platform.openai.com/docs/pricing
-    private enum PricedModel: String {
-        case sol = "gpt-5.6-sol"
-        case terra = "gpt-5.6-terra"
-        case luna = "gpt-5.6-luna"
-
-        var rates: APIRates {
-            switch self {
-            case .sol:
-                APIRates(input: 5, cachedInput: 0.5, cacheWriteInput: 6.25, output: 30)
-            case .terra:
-                APIRates(input: 2.5, cachedInput: 0.25, cacheWriteInput: 3.125, output: 15)
-            case .luna:
-                APIRates(input: 1, cachedInput: 0.1, cacheWriteInput: 1.25, output: 6)
-            }
+    private func rates(for model: CodexTrackedModel) -> APIRates {
+        switch model {
+        case .sol:
+            APIRates(input: 5, cachedInput: 0.5, cacheWriteInput: 6.25, output: 30)
+        case .terra:
+            APIRates(input: 2.5, cachedInput: 0.25, cacheWriteInput: 3.125, output: 15)
+        case .luna:
+            APIRates(input: 1, cachedInput: 0.1, cacheWriteInput: 1.25, output: 6)
         }
+    }
 
-        func cost(for usage: SessionRecord.TokenUsage) -> Decimal {
-            let regularInputTokens = usage.inputTokens
-                - usage.cachedInputTokens
-                - usage.cacheWriteInputTokens
-            let rates = rates
-            let costPerMillion = Decimal(regularInputTokens) * rates.input
-                + Decimal(usage.cachedInputTokens) * rates.cachedInput
-                + Decimal(usage.cacheWriteInputTokens) * rates.cacheWriteInput
-                + Decimal(usage.outputTokens) * rates.output
-            return costPerMillion / 1_000_000
-        }
+    private func cost(
+        for usage: SessionRecord.TokenUsage,
+        model: CodexTrackedModel
+    ) -> Decimal {
+        let regularInputTokens = usage.inputTokens
+            - usage.cachedInputTokens
+            - usage.cacheWriteInputTokens
+        let rates = rates(for: model)
+        let costPerMillion = Decimal(regularInputTokens) * rates.input
+            + Decimal(usage.cachedInputTokens) * rates.cachedInput
+            + Decimal(usage.cacheWriteInputTokens) * rates.cacheWriteInput
+            + Decimal(usage.outputTokens) * rates.output
+        return costPerMillion / 1_000_000
     }
 
     private struct APIRates {
@@ -192,11 +278,11 @@ actor CodexMonitor {
             }
         }
 
-        struct RateLimits: Decodable {
+        struct RateLimits: Codable {
             let primary: Window?
             let secondary: Window?
 
-            struct Window: Decodable {
+            struct Window: Codable {
                 let usedPercent: Double
                 let resetsAt: TimeInterval?
                 let windowMinutes: Int64?
@@ -244,23 +330,30 @@ actor CodexMonitor {
     private let codexHome: URL
     private let databaseURL: URL
     private let sessionsURL: URL
+    private let cacheURL: URL
     private let decoder = JSONDecoder()
     private let timestampFormatter: ISO8601DateFormatter
     private let pollInterval: Duration
     private var fileStates = [URL: SessionFileState]()
     private var monitoredDayStart: Date?
+    private var monitoredTimeZoneIdentifier: String?
 
     init(
         codexHome: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex", isDirectory: true),
         fileManager: FileManager = .default,
-        pollInterval: Duration = .seconds(2)
+        pollInterval: Duration = .seconds(2),
+        cacheURL: URL? = nil
     ) {
         self.codexHome = codexHome
         self.fileManager = fileManager
         self.pollInterval = pollInterval
         databaseURL = codexHome.appendingPathComponent("state_5.sqlite")
         sessionsURL = codexHome.appendingPathComponent("sessions", isDirectory: true)
+        self.cacheURL = cacheURL ?? fileManager
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TokenBar", isDirectory: true)
+            .appendingPathComponent("usage-history.json")
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -276,7 +369,11 @@ actor CodexMonitor {
 
             do {
                 let dayStart = Calendar.autoupdatingCurrent.startOfDay(for: now)
-                if monitoredDayStart != dayStart {
+                let timeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
+                if monitoredTimeZoneIdentifier != timeZoneIdentifier {
+                    fileStates.removeAll(keepingCapacity: true)
+                    needsFullRefresh = true
+                } else if monitoredDayStart != dayStart {
                     needsFullRefresh = true
                 }
 
@@ -309,26 +406,44 @@ actor CodexMonitor {
 
         let calendar = Calendar.autoupdatingCurrent
         let dayStart = calendar.startOfDay(for: now)
+        let historyStart = calendar.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? now
-        let dayInterval = DateInterval(start: dayStart, end: dayEnd)
+        let historyInterval = DateInterval(start: historyStart, end: dayEnd)
         let activeLookback = now.addingTimeInterval(-30 * 60)
-        let queryStart = min(dayStart, activeLookback)
+        let urls = try rolloutURLs(updatedSince: historyStart)
 
-        fileStates.removeAll(keepingCapacity: true)
+        if fileStates.isEmpty {
+            fileStates = loadCache()
+        }
+        let cachedFileCount = fileStates.count
+        fileStates = fileStates.filter { urls.contains($0.key) }
         monitoredDayStart = dayStart
+        monitoredTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
 
-        for url in try rolloutURLs(updatedSince: queryStart) {
-            try refreshFile(at: url, dayInterval: dayInterval, reset: true)
+        var cacheChanged = fileStates.count != cachedFileCount
+        for url in urls {
+            if try refreshFile(at: url, historyInterval: historyInterval) {
+                cacheChanged = true
+            }
         }
 
         if isColdLaunch {
-            for url in fileStates.keys {
+            for url in Array(fileStates.keys) {
                 guard let modificationDate = fileStates[url]?.modificationDate,
-                      modificationDate < activeLookback else {
-                    continue
+                      modificationDate < activeLookback,
+                      fileStates[url]?.activeTurns.isEmpty == false else {
+                      continue
                 }
                 fileStates[url]?.activeTurns.removeAll()
+                cacheChanged = true
             }
+        }
+
+        if pruneHistory(before: historyStart) {
+            cacheChanged = true
+        }
+        if cacheChanged || !fileManager.fileExists(atPath: cacheURL.path) {
+            saveCache()
         }
     }
 
@@ -337,24 +452,50 @@ actor CodexMonitor {
 
         let calendar = Calendar.autoupdatingCurrent
         let dayStart = calendar.startOfDay(for: now)
+        let historyStart = calendar.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? now
-        let dayInterval = DateInterval(start: dayStart, end: dayEnd)
+        let historyInterval = DateInterval(start: historyStart, end: dayEnd)
         let indexedURLs = try rolloutURLs(updatedSince: dayStart)
-        let urls = Set(fileStates.keys).union(indexedURLs)
 
-        for url in urls {
-            try refreshFile(at: url, dayInterval: dayInterval, reset: false)
+        var cacheChanged = false
+        for url in indexedURLs {
+            if try refreshFile(at: url, historyInterval: historyInterval) {
+                cacheChanged = true
+            }
+        }
+        if cacheChanged {
+            saveCache()
         }
     }
 
     private func makeSnapshot(now: Date) -> TokenBarSnapshot {
-        let totalTokens = fileStates.values.reduce(Int64(0)) { total, state in
-            total + state.todayTokens
-        }
-        let hasActiveTurn = fileStates.values.contains { !$0.activeTurns.isEmpty }
         let calendar = Calendar.autoupdatingCurrent
         let dayStart = monitoredDayStart ?? calendar.startOfDay(for: now)
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? now
+        let days = (0..<30).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset - 29, to: dayStart)
+        }
+        var usageByDay = Dictionary(
+            uniqueKeysWithValues: days.map { ($0, CodexDailyUsage(day: $0)) }
+        )
+
+        var totalTokens = Int64.zero
+        for state in fileStates.values {
+            totalTokens += state.allTokensByDay[dayStart, default: 0]
+            for (day, usage) in state.dailyUsage where usageByDay[day] != nil {
+                usageByDay[day]?.add(usage)
+            }
+        }
+
+        let dailyUsage = days.compactMap { usageByDay[$0] }
+        let todayUsage = dailyUsage.last ?? CodexDailyUsage(day: dayStart)
+        let last30DaysTokens = dailyUsage.reduce(Int64.zero) { total, usage in
+            total + usage.totalTokens
+        }
+        let last30DaysAPICostUSD = dailyUsage.reduce(Decimal.zero) { total, usage in
+            total + usage.estimatedAPICostUSD
+        }
+        let hasActiveTurn = fileStates.values.contains { !$0.activeTurns.isEmpty }
         let latestTerminalEvent = fileStates.values
             .compactMap(\.latestTerminalEvent)
             .filter { $0.date >= dayStart && $0.date < dayEnd }
@@ -363,12 +504,6 @@ actor CodexMonitor {
             .compactMap(\.latestRateLimits)
             .max { $0.date < $1.date }?
             .snapshot
-        let hasUnpricedTodayUsage = fileStates.values.contains { $0.hasUnpricedTodayUsage }
-        let estimatedAPICostUSD = hasUnpricedTodayUsage ? nil : fileStates.values.reduce(
-            Decimal.zero
-        ) { total, state in
-            total + state.todayAPICostUSD
-        }
 
         let status: CodexStatus
         if hasActiveTurn {
@@ -385,7 +520,11 @@ actor CodexMonitor {
             lastUpdated: now,
             fiveHourLimit: rateLimitWindow(durationMinutes: 300, in: latestRateLimits),
             weeklyLimit: rateLimitWindow(durationMinutes: 10_080, in: latestRateLimits),
-            estimatedAPICostUSD: estimatedAPICostUSD
+            estimatedAPICostUSD: todayUsage.estimatedAPICostUSD,
+            trackedTodayTokens: todayUsage.totalTokens,
+            last30DaysTokens: last30DaysTokens,
+            last30DaysAPICostUSD: last30DaysAPICostUSD,
+            dailyUsage: dailyUsage
         )
     }
 
@@ -402,6 +541,55 @@ actor CodexMonitor {
             usedPercent: window.usedPercent,
             resetsAt: window.resetsAt.map(Date.init(timeIntervalSince1970:))
         )
+    }
+
+    private func loadCache() -> [URL: SessionFileState] {
+        guard let data = try? Data(contentsOf: cacheURL),
+              let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
+              cache.version == 1,
+              cache.codexHomePath == codexHome.path,
+              cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
+            return [:]
+        }
+
+        return Dictionary(uniqueKeysWithValues: cache.files.map { file in
+            (URL(fileURLWithPath: file.path), file.state)
+        })
+    }
+
+    private func saveCache() {
+        let cache = UsageCache(
+            version: 1,
+            codexHomePath: codexHome.path,
+            timeZoneIdentifier: TimeZone.autoupdatingCurrent.identifier,
+            files: fileStates.map { url, state in
+                CachedSessionFile(path: url.path, state: state)
+            }
+        )
+
+        guard let data = try? JSONEncoder().encode(cache) else { return }
+        let directoryURL = cacheURL.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try? data.write(to: cacheURL, options: .atomic)
+    }
+
+    private func pruneHistory(before historyStart: Date) -> Bool {
+        var changed = false
+
+        for url in Array(fileStates.keys) {
+            guard var state = fileStates[url] else { continue }
+            let tokenCount = state.allTokensByDay.count
+            let usageCount = state.dailyUsage.count
+            state.allTokensByDay = state.allTokensByDay.filter { $0.key >= historyStart }
+            state.dailyUsage = state.dailyUsage.filter { $0.key >= historyStart }
+
+            if state.allTokensByDay.count != tokenCount || state.dailyUsage.count != usageCount {
+                fileStates[url] = state
+                changed = true
+            }
+        }
+
+        return changed
     }
 
     private func validateCodexStorage() throws {
@@ -450,10 +638,10 @@ actor CodexMonitor {
         }
     }
 
-    private func refreshFile(at url: URL, dayInterval: DateInterval, reset: Bool) throws {
+    @discardableResult
+    private func refreshFile(at url: URL, historyInterval: DateInterval) throws -> Bool {
         guard fileManager.fileExists(atPath: url.path) else {
-            fileStates.removeValue(forKey: url)
-            return
+            return fileStates.removeValue(forKey: url) != nil
         }
 
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
@@ -461,20 +649,22 @@ actor CodexMonitor {
         let modificationDate = attributes[.modificationDate] as? Date
         let fileIdentifier = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
 
-        var state = reset ? SessionFileState() : fileStates[url, default: SessionFileState()]
+        var state = fileStates[url, default: SessionFileState()]
         let wasReplaced = state.fileIdentifier != nil && state.fileIdentifier != fileIdentifier
         let wasRewrittenAtSameSize = fileSize == state.offset
             && state.modificationDate != nil
             && state.modificationDate != modificationDate
+        var changed = false
         if fileSize < state.offset || wasReplaced || wasRewrittenAtSameSize {
             state = SessionFileState()
+            changed = true
         }
         state.modificationDate = modificationDate
         state.fileIdentifier = fileIdentifier
 
         guard fileSize > state.offset else {
             fileStates[url] = state
-            return
+            return changed
         }
 
         let handle = try FileHandle(forReadingFrom: url)
@@ -483,13 +673,18 @@ actor CodexMonitor {
 
         while let data = try handle.read(upToCount: 64 * 1_024), !data.isEmpty {
             state.offset += UInt64(data.count)
-            process(data: data, dayInterval: dayInterval, state: &state)
+            process(data: data, historyInterval: historyInterval, state: &state)
         }
 
         fileStates[url] = state
+        return true
     }
 
-    private func process(data: Data, dayInterval: DateInterval, state: inout SessionFileState) {
+    private func process(
+        data: Data,
+        historyInterval: DateInterval,
+        state: inout SessionFileState
+    ) {
         var buffer = state.trailingData
         buffer.append(data)
 
@@ -497,7 +692,7 @@ actor CodexMonitor {
         while let newline = buffer[lineStart...].firstIndex(of: 0x0A) {
             process(
                 line: Data(buffer[lineStart..<newline]),
-                dayInterval: dayInterval,
+                historyInterval: historyInterval,
                 state: &state
             )
             lineStart = buffer.index(after: newline)
@@ -506,7 +701,11 @@ actor CodexMonitor {
         state.trailingData = Data(buffer[lineStart...])
     }
 
-    private func process(line: Data, dayInterval: DateInterval, state: inout SessionFileState) {
+    private func process(
+        line: Data,
+        historyInterval: DateInterval,
+        state: inout SessionFileState
+    ) {
         if line.range(of: Data(#""type":"turn_context""#.utf8)) != nil,
            let record = try? decoder.decode(TurnContextRecord.self, from: line),
            record.type == "turn_context" {
@@ -527,27 +726,26 @@ actor CodexMonitor {
                 state.latestRateLimits = RateLimitEvent(date: date, snapshot: rateLimits)
             }
 
-            guard date >= dayInterval.start,
-                  date < dayInterval.end,
+            guard date >= historyInterval.start,
+                  date < historyInterval.end,
                   let usage = record.payload.info?.lastTokenUsage else {
                 return
             }
-            state.todayTokens += usage.totalTokens
+            let day = Calendar.autoupdatingCurrent.startOfDay(for: date)
+            state.allTokensByDay[day, default: 0] += usage.totalTokens
 
-            guard let currentModelID = state.currentModelID else {
-                state.hasUnpricedTodayUsage = true
+            guard let currentModelID = state.currentModelID,
+                  let model = CodexTrackedModel(rawValue: currentModelID) else {
                 return
             }
 
-            if currentModelID == "codex-auto-review" {
-                return
-            }
-
-            guard let model = PricedModel(rawValue: currentModelID) else {
-                state.hasUnpricedTodayUsage = true
-                return
-            }
-            state.todayAPICostUSD += model.cost(for: usage)
+            var dailyUsage = state.dailyUsage[day] ?? CodexDailyUsage(day: day)
+            dailyUsage.add(
+                tokens: usage.totalTokens,
+                cost: cost(for: usage, model: model),
+                for: model
+            )
+            state.dailyUsage[day] = dailyUsage
 
         case "task_started":
             guard let turnID = record.payload.turnID else { return }
