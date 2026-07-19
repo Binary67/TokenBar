@@ -237,7 +237,9 @@ private struct UsageOverviewView: View {
                 )
             }
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .padding(.top, 10)
         .frame(width: 340, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
     }
