@@ -30,9 +30,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let usageOverviewItem = NSMenuItem()
+    private let agentActivityItem = NSMenuItem()
+    private let usageValueItem = NSMenuItem()
     private let iconConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
     private let statusIconImageView = StatusIconImageView()
     private var usageOverviewHostingView: NSHostingView<UsageOverviewView>?
+    private var agentActivityHostingView: NSHostingView<AgentActivityDetailView>?
+    private var usageValueHostingView: NSHostingView<UsageValueDetailView>?
     private var monitoringTask: Task<Void, Never>?
     private var displayedStatus: CodexStatus?
     private var snapshot = TokenBarSnapshot(status: .loading, todayTokens: 0, lastUpdated: .now)
@@ -70,8 +74,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usageOverviewItem.view = overviewHostingView
         usageOverviewHostingView = overviewHostingView
 
+        let agentActivityHostingView = NSHostingView(
+            rootView: AgentActivityDetailView(snapshot: snapshot)
+        )
+        agentActivityHostingView.frame.size = agentActivityHostingView.fittingSize
+        let agentActivityDetailItem = NSMenuItem()
+        agentActivityDetailItem.view = agentActivityHostingView
+        let agentActivityMenu = NSMenu()
+        agentActivityMenu.addItem(agentActivityDetailItem)
+        agentActivityItem.submenu = agentActivityMenu
+        self.agentActivityHostingView = agentActivityHostingView
+
+        let usageValueHostingView = NSHostingView(
+            rootView: UsageValueDetailView(snapshot: snapshot)
+        )
+        usageValueHostingView.frame.size = usageValueHostingView.fittingSize
+        let usageValueDetailItem = NSMenuItem()
+        usageValueDetailItem.view = usageValueHostingView
+        let usageValueMenu = NSMenu()
+        usageValueMenu.addItem(usageValueDetailItem)
+        usageValueItem.submenu = usageValueMenu
+        self.usageValueHostingView = usageValueHostingView
+
         let menu = NSMenu()
         menu.addItem(usageOverviewItem)
+        menu.addItem(agentActivityItem)
+        menu.addItem(usageValueItem)
         menu.addItem(.separator())
 
         let refreshItem = NSMenuItem(
@@ -137,6 +165,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let usageOverviewHostingView {
             usageOverviewHostingView.rootView = UsageOverviewView(snapshot: snapshot)
             usageOverviewHostingView.frame.size = usageOverviewHostingView.fittingSize
+        }
+        if let agentTime = snapshot.todayAgentTimeMilliseconds {
+            agentActivityItem.title = "Agent Activity · \(AgentTimeFormatter.compact(agentTime)) Today"
+        } else {
+            agentActivityItem.title = "Agent Activity · Not Reported"
+        }
+        if let valueMultiple = snapshot.subscriptionValueMultiple {
+            usageValueItem.title = "Usage Value · "
+                + "\(UsageValueFormatter.multiple(valueMultiple)) Plan Price"
+        } else {
+            usageValueItem.title = "Usage Value · Not Reported"
+        }
+        if let agentActivityHostingView {
+            agentActivityHostingView.rootView = AgentActivityDetailView(snapshot: snapshot)
+            agentActivityHostingView.frame.size = agentActivityHostingView.fittingSize
+        }
+        if let usageValueHostingView {
+            usageValueHostingView.rootView = UsageValueDetailView(snapshot: snapshot)
+            usageValueHostingView.frame.size = usageValueHostingView.fittingSize
         }
     }
 
@@ -232,10 +279,6 @@ private struct UsageOverviewView: View {
 
                 Divider()
 
-                ProductivityView(snapshot: snapshot)
-
-                Divider()
-
                 VStack(alignment: .leading, spacing: 7) {
                     Text("Usage Limits")
                         .font(.caption.weight(.medium))
@@ -250,16 +293,12 @@ private struct UsageOverviewView: View {
                         includesDate: true
                     )
                 }
-
-                if let valueMultiple = snapshot.subscriptionValueMultiple {
-                    Divider()
-
-                    SubscriptionValueView(
-                        valueMultiple: valueMultiple,
-                        estimatedBreakEvenDays: snapshot.estimatedBreakEvenDays
-                    )
-                }
             }
+
+            Divider()
+
+            Text("Activity & Value")
+                .font(.caption.weight(.medium))
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
@@ -292,85 +331,104 @@ private struct LoadingHistoryView: View {
     }
 }
 
-private struct SubscriptionValueView: View {
-    let valueMultiple: Decimal
-    let estimatedBreakEvenDays: Int?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Plan Value")
-                .font(.caption.weight(.medium))
-            HStack {
-                Text("Value Multiple")
-                Spacer()
-                Text("\(UsageValueFormatter.multiple(valueMultiple)) plan cost")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .font(.caption)
-            HStack {
-                Text("Estimated Break-Even")
-                Spacer()
-                Text(breakEvenDuration)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .font(.caption)
-        }
-        .help(
-            "Compares the last 30 days of estimated API-equivalent usage with the plan price. "
-                + "Break-even uses the daily average since the first tracked usage day in that period."
-        )
-    }
-
-    private var breakEvenDuration: String {
-        guard let estimatedBreakEvenDays else { return "—" }
-        return "\(estimatedBreakEvenDays) \(estimatedBreakEvenDays == 1 ? "day" : "days")"
-    }
-}
-
-private struct ProductivityView: View {
+private struct AgentActivityDetailView: View {
     let snapshot: TokenBarSnapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Productivity")
-                .font(.caption.weight(.medium))
-            ProductivityRow(
-                label: "Threads Started",
-                detail: threadDetail
-            )
-            ProductivityRow(
-                label: "Agent Time",
-                detail: agentTimeDetail
-            )
-            .help(
-                "Total Codex runtime, not estimated human time saved. "
-                    + "Parallel agents are counted separately, and finished runs include "
-                    + "completed, interrupted, and failed work."
-            )
+            Text("Agent Activity")
+                .font(.headline)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Text("Today")
+                    .frame(width: 64, alignment: .trailing)
+                Text("Last 30 Days")
+                    .frame(width: 86, alignment: .trailing)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+
+            HStack {
+                Text("Threads Started")
+                Spacer()
+                Text(threadsToday)
+                    .frame(width: 64, alignment: .trailing)
+                    .monospacedDigit()
+                Text(threadsLast30Days)
+                    .frame(width: 86, alignment: .trailing)
+                    .monospacedDigit()
+            }
+            .font(.caption)
+
+            HStack {
+                Text("Agent Runtime")
+                Spacer()
+                Text(agentTimeToday)
+                    .frame(width: 64, alignment: .trailing)
+                    .monospacedDigit()
+                Text(agentTimeLast30Days)
+                    .frame(width: 86, alignment: .trailing)
+                    .monospacedDigit()
+            }
+            .font(.caption)
         }
+        .padding(12)
+        .frame(width: 300, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var threadDetail: String {
-        guard let today = snapshot.todayThreadsStarted,
-              let last30Days = snapshot.last30DaysThreadsStarted else {
-            return "Not reported"
-        }
-        return "\(today) today · \(last30Days) / 30d"
+    private var threadsToday: String {
+        snapshot.todayThreadsStarted.map(String.init) ?? "—"
     }
 
-    private var agentTimeDetail: String {
-        guard let today = snapshot.todayAgentTimeMilliseconds,
-              let last30Days = snapshot.last30DaysAgentTimeMilliseconds else {
-            return "Not reported"
-        }
-        return "\(AgentTimeFormatter.compact(today)) today · "
-            + "\(AgentTimeFormatter.compact(last30Days)) / 30d"
+    private var threadsLast30Days: String {
+        snapshot.last30DaysThreadsStarted.map(String.init) ?? "—"
+    }
+
+    private var agentTimeToday: String {
+        snapshot.todayAgentTimeMilliseconds.map(AgentTimeFormatter.compact) ?? "—"
+    }
+
+    private var agentTimeLast30Days: String {
+        snapshot.last30DaysAgentTimeMilliseconds.map(AgentTimeFormatter.compact) ?? "—"
     }
 }
 
-private struct ProductivityRow: View {
+private struct UsageValueDetailView: View {
+    let snapshot: TokenBarSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Usage Value")
+                .font(.headline)
+
+            Divider()
+
+            UsageDetailRow(label: "Value Multiple", detail: valueMultipleDetail)
+            UsageDetailRow(label: "Estimated Break-Even", detail: breakEvenDuration)
+        }
+        .padding(12)
+        .frame(width: 300, alignment: .topLeading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var valueMultipleDetail: String {
+        guard let valueMultiple = snapshot.subscriptionValueMultiple else {
+            return "Not Reported"
+        }
+        return "\(UsageValueFormatter.multiple(valueMultiple)) Plan Price"
+    }
+
+    private var breakEvenDuration: String {
+        guard let days = snapshot.estimatedBreakEvenDays else { return "Not Reported" }
+        return "\(days) \(days == 1 ? "day" : "days")"
+    }
+}
+
+private struct UsageDetailRow: View {
     let label: String
     let detail: String
 
