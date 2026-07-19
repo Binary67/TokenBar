@@ -435,6 +435,26 @@ actor CodexMonitor {
     func run(handler: @escaping SnapshotHandler) async {
         var needsFullRefresh = true
         var isColdLaunch = true
+        var hasPublishedSnapshot = false
+
+        let cachedNow = Date()
+        let currentTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
+        if monitoredTimeZoneIdentifier != nil,
+           monitoredTimeZoneIdentifier != currentTimeZoneIdentifier {
+            fileStates.removeAll(keepingCapacity: true)
+        }
+        if fileStates.isEmpty {
+            fileStates = loadCache()
+        }
+        if !fileStates.isEmpty {
+            monitoredDayStart = Calendar.autoupdatingCurrent.startOfDay(for: cachedNow)
+            monitoredTimeZoneIdentifier = currentTimeZoneIdentifier
+            if clearStaleActiveTurns(before: cachedNow.addingTimeInterval(-30 * 60)) {
+                saveCache()
+            }
+            await handler(makeSnapshot(now: cachedNow))
+            hasPublishedSnapshot = true
+        }
 
         while !Task.isCancelled {
             let now = Date()
@@ -458,10 +478,14 @@ actor CodexMonitor {
                 }
 
                 await handler(makeSnapshot(now: now))
+                hasPublishedSnapshot = true
             } catch {
-                await handler(
-                    TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: now)
-                )
+                if !hasPublishedSnapshot {
+                    await handler(
+                        TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: now)
+                    )
+                    hasPublishedSnapshot = true
+                }
                 needsFullRefresh = true
             }
 
@@ -484,9 +508,6 @@ actor CodexMonitor {
         let activeLookback = now.addingTimeInterval(-30 * 60)
         let urls = try rolloutURLs(updatedSince: historyStart)
 
-        if fileStates.isEmpty {
-            fileStates = loadCache()
-        }
         let cachedFileCount = fileStates.count
         fileStates = fileStates.filter { urls.contains($0.key) }
         monitoredDayStart = dayStart
@@ -500,13 +521,7 @@ actor CodexMonitor {
         }
 
         if isColdLaunch {
-            for url in Array(fileStates.keys) {
-                guard let modificationDate = fileStates[url]?.modificationDate,
-                      modificationDate < activeLookback,
-                      fileStates[url]?.activeTurns.isEmpty == false else {
-                      continue
-                }
-                fileStates[url]?.activeTurns.removeAll()
+            if clearStaleActiveTurns(before: activeLookback) {
                 cacheChanged = true
             }
         }
@@ -517,6 +532,22 @@ actor CodexMonitor {
         if cacheChanged || !fileManager.fileExists(atPath: cacheURL.path) {
             saveCache()
         }
+    }
+
+    private func clearStaleActiveTurns(before cutoff: Date) -> Bool {
+        var changed = false
+
+        for url in Array(fileStates.keys) {
+            guard let modificationDate = fileStates[url]?.modificationDate,
+                  modificationDate < cutoff,
+                  fileStates[url]?.activeTurns.isEmpty == false else {
+                continue
+            }
+            fileStates[url]?.activeTurns.removeAll()
+            changed = true
+        }
+
+        return changed
     }
 
     private func refresh(now: Date) throws {

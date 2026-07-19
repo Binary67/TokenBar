@@ -543,7 +543,10 @@ final class CodexMonitorTests: XCTestCase {
         try handle.write(contentsOf: tokenRecord(at: now.addingTimeInterval(2), tokens: 200))
         try handle.close()
 
-        let updated = await firstSnapshot(from: makeMonitor(codexHome: home))
+        let updated = await firstSnapshot(
+            from: makeMonitor(codexHome: home),
+            matching: { $0.trackedTodayTokens == 300 }
+        )
         let unchanged = await firstSnapshot(from: makeMonitor(codexHome: home))
 
         XCTAssertEqual(initial.trackedTodayTokens, 100)
@@ -554,6 +557,54 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(unchanged.subscriptionPlan, .pro5x)
         XCTAssertEqual(try apiCost(from: updated), 0.00083, accuracy: 0.000_000_001)
         XCTAssertEqual(try apiCost(from: unchanged), 0.00083, accuracy: 0.000_000_001)
+    }
+
+    func testCachedSnapshotIsPublishedWhenDatabaseIsUnavailable() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: now),
+            tokenRecord(at: now.addingTimeInterval(1), tokens: 250),
+        ])
+
+        let initial = await firstSnapshot(from: makeMonitor(codexHome: home))
+        try FileManager.default.removeItem(at: home.appendingPathComponent("state_5.sqlite"))
+        let cached = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(initial.status, .idle)
+        XCTAssertEqual(cached.status, .idle)
+        XCTAssertEqual(cached.todayTokens, 250)
+        XCTAssertEqual(cached.trackedTodayTokens, 250)
+        XCTAssertEqual(cached.last30DaysTokens, 250)
+        XCTAssertNotNil(cached.estimatedAPICostUSD)
+    }
+
+    func testRefreshFailureDoesNotReplaceLastSnapshot() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: now),
+            tokenRecord(at: now.addingTimeInterval(1), tokens: 100),
+        ])
+        let monitor = makeMonitor(codexHome: home, pollInterval: .milliseconds(20))
+        let reported = expectation(description: "Usage reported")
+        let unavailable = expectation(description: "Unavailable snapshot is not published")
+        unavailable.isInverted = true
+        var didReportUsage = false
+
+        let task = Task {
+            await monitor.run { snapshot in
+                if snapshot.status == .unavailable {
+                    unavailable.fulfill()
+                } else if snapshot.todayTokens == 100, !didReportUsage {
+                    didReportUsage = true
+                    reported.fulfill()
+                }
+            }
+        }
+
+        await fulfillment(of: [reported], timeout: 2)
+        try FileManager.default.removeItem(at: home.appendingPathComponent("state_5.sqlite"))
+        await fulfillment(of: [unavailable], timeout: 0.15)
+        task.cancel()
     }
 
     func testMissingCodexStorageIsUnavailable() async throws {
@@ -584,12 +635,15 @@ final class CodexMonitorTests: XCTestCase {
         )
     }
 
-    private func firstSnapshot(from monitor: CodexMonitor) async -> TokenBarSnapshot {
+    private func firstSnapshot(
+        from monitor: CodexMonitor,
+        matching predicate: @escaping @MainActor @Sendable (TokenBarSnapshot) -> Bool = { _ in true }
+    ) async -> TokenBarSnapshot {
         let received = expectation(description: "Snapshot received")
         var result: TokenBarSnapshot?
         let task = Task {
             await monitor.run { snapshot in
-                guard result == nil else { return }
+                guard result == nil, predicate(snapshot) else { return }
                 result = snapshot
                 received.fulfill()
             }
