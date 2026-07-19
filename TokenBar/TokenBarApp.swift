@@ -237,55 +237,56 @@ private struct UsageOverviewView: View {
                 )
             }
 
-            if let subscriptionPlan = snapshot.subscriptionPlan,
-               let valueMultiple = snapshot.subscriptionValueMultiple,
-               let last30DaysAPICostUSD = snapshot.last30DaysAPICostUSD {
+            if let valueMultiple = snapshot.subscriptionValueMultiple {
                 Divider()
 
                 SubscriptionValueView(
-                    plan: subscriptionPlan,
                     valueMultiple: valueMultiple,
-                    apiEquivalentValue: last30DaysAPICostUSD
+                    estimatedBreakEvenDays: snapshot.estimatedBreakEvenDays
                 )
             }
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, 14)
+        .padding(.bottom, 8)
         .padding(.top, 10)
         .frame(width: 340, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
     }
 
     private var headerTitle: String {
-        guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex Usage" }
-        return "Codex Usage · \(subscriptionPlan.label)"
+        guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex" }
+        return "Codex · \(subscriptionPlan.label)"
     }
 }
 
 private struct SubscriptionValueView: View {
-    let plan: CodexSubscriptionPlan
     let valueMultiple: Decimal
-    let apiEquivalentValue: Decimal
+    let estimatedBreakEvenDays: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Subscription value (last 30 days)")
+            Text("Plan value")
                 .font(.caption.weight(.medium))
-            Text("\(UsageValueFormatter.multiple(valueMultiple)) value received")
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-            Text(
-                "\(UsageValueFormatter.cost(apiEquivalentValue)) API-equivalent usage"
-                    + " · \(UsageValueFormatter.monthlyPrice(plan.monthlyPriceUSD)) \(plan.label)"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .monospacedDigit()
+            HStack(alignment: .firstTextBaseline) {
+                Text("\(UsageValueFormatter.multiple(valueMultiple)) plan cost")
+                    .font(.caption.weight(.medium))
+                    .monospacedDigit()
+                Spacer()
+                Text("Estimated break-even · \(breakEvenDuration)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
         }
         .help(
-            "Compares the last 30 days of estimated API-equivalent usage "
-                + "with the monthly \(plan.label) price."
+            "Compares the last 30 days of estimated API-equivalent usage with the plan price. "
+                + "Break-even uses the average daily value over that period."
         )
+    }
+
+    private var breakEvenDuration: String {
+        guard let estimatedBreakEvenDays else { return "—" }
+        return "\(estimatedBreakEvenDays) \(estimatedBreakEvenDays == 1 ? "day" : "days")"
     }
 }
 
@@ -509,13 +510,6 @@ private enum UsageValueFormatter {
         ) + "×"
     }
 
-    static func monthlyPrice(_ price: Decimal) -> String {
-        price.formatted(
-            .currency(code: "USD")
-                .locale(Locale(identifier: "en_US"))
-                .precision(.fractionLength(0))
-        )
-    }
 }
 
 private extension CodexTrackedModel {

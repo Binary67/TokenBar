@@ -47,6 +47,19 @@ struct TokenBarSnapshot: Equatable, Sendable {
         guard let last30DaysAPICostUSD, let subscriptionPlan else { return nil }
         return last30DaysAPICostUSD / subscriptionPlan.monthlyPriceUSD
     }
+
+    var estimatedBreakEvenDays: Int? {
+        guard let last30DaysAPICostUSD,
+              last30DaysAPICostUSD > 0,
+              let subscriptionPlan else {
+            return nil
+        }
+
+        var estimate = subscriptionPlan.monthlyPriceUSD * 30 / last30DaysAPICostUSD
+        var roundedEstimate = Decimal.zero
+        NSDecimalRound(&roundedEstimate, &estimate, 0, .plain)
+        return max(1, NSDecimalNumber(decimal: roundedEstimate).intValue)
+    }
 }
 
 enum CodexSubscriptionPlan: Equatable, Sendable {

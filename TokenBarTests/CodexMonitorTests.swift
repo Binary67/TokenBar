@@ -21,7 +21,7 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(CodexRateLimitWindow(usedPercent: 101, resetsAt: nil).percentLeft, 0)
     }
 
-    func testMapsProSubscriptionPlansAndCalculatesValueMultiple() throws {
+    func testMapsProSubscriptionPlansAndCalculatesValueMetrics() throws {
         let pro5x = try XCTUnwrap(CodexSubscriptionPlan(planType: "prolite"))
         let pro20x = try XCTUnwrap(CodexSubscriptionPlan(planType: "pro"))
 
@@ -50,6 +50,26 @@ final class CodexMonitorTests: XCTestCase {
 
         XCTAssertEqual(pro5xSnapshot.subscriptionValueMultiple, 3.8)
         XCTAssertEqual(pro20xSnapshot.subscriptionValueMultiple, 1.9)
+        XCTAssertEqual(pro5xSnapshot.estimatedBreakEvenDays, 8)
+        XCTAssertEqual(pro20xSnapshot.estimatedBreakEvenDays, 16)
+
+        let estimatedSeventeenDaySnapshot = TokenBarSnapshot(
+            status: .idle,
+            todayTokens: 0,
+            lastUpdated: .now,
+            last30DaysAPICostUSD: 174.32,
+            subscriptionPlan: pro5x
+        )
+        XCTAssertEqual(estimatedSeventeenDaySnapshot.estimatedBreakEvenDays, 17)
+
+        let inactiveSnapshot = TokenBarSnapshot(
+            status: .idle,
+            todayTokens: 0,
+            lastUpdated: .now,
+            last30DaysAPICostUSD: 0,
+            subscriptionPlan: pro5x
+        )
+        XCTAssertNil(inactiveSnapshot.estimatedBreakEvenDays)
     }
 
     func testCalculatesStandardAPIEquivalentCostForSupportedModels() async throws {
