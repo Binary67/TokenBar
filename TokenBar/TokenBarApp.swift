@@ -8,6 +8,12 @@
 import AppKit
 import SwiftUI
 
+private final class StatusIconImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
 @main
 struct TokenBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -24,9 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let monitor = CodexMonitor()
     private let usageOverviewItem = NSMenuItem()
-    private let iconConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+    private let iconConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+    private let statusIconImageView = StatusIconImageView()
     private var usageOverviewHostingView: NSHostingView<UsageOverviewView>?
     private var monitoringTask: Task<Void, Never>?
+    private var displayedStatus: CodexStatus?
     private var snapshot = TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: .now)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.imagePosition = .imageLeft
         button.imageScaling = .scaleProportionallyDown
         button.toolTip = "Loading Codex usage…"
+        statusIconImageView.imageScaling = .scaleProportionallyDown
+        button.addSubview(statusIconImageView)
 
         let overviewHostingView = NSHostingView(
             rootView: UsageOverviewView(snapshot: snapshot)
@@ -106,8 +116,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Codex data unavailable"
             : "\(snapshot.status.label) — \(exactTokenText) tokens today"
 
-        setStatusIcon(snapshot.status)
-
         statusItem.button?.attributedTitle = NSAttributedString(
             string: tokenText,
             attributes: [
@@ -117,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             ]
         )
+        setStatusIcon(snapshot.status)
         statusItem.button?.toolTip = detail
         if let usageOverviewHostingView {
             usageOverviewHostingView.rootView = UsageOverviewView(snapshot: snapshot)
@@ -125,6 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setStatusIcon(_ status: CodexStatus) {
+        guard status != displayedStatus else { return }
+
         guard let button = statusItem.button,
               let image = NSImage(
                   systemSymbolName: status.symbolName,
@@ -134,8 +145,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         image.isTemplate = true
-        button.image = image
+        button.image = NSImage(
+            size: NSSize(width: image.size.width + 3, height: image.size.height)
+        )
+        button.layoutSubtreeIfNeeded()
+        let imageRect = button.cell?.imageRect(forBounds: button.bounds) ?? .zero
+        statusIconImageView.frame = NSRect(
+            x: imageRect.minX,
+            y: button.bounds.midY - image.size.height / 2,
+            width: image.size.width,
+            height: image.size.height
+        )
+        statusIconImageView.image = image
+        statusIconImageView.removeAllSymbolEffects()
+        if status == .working {
+            statusIconImageView.addSymbolEffect(
+                .rotate.clockwise.wholeSymbol,
+                options: .repeat(.continuous)
+            )
+        }
+
         button.setAccessibilityLabel(status.label)
+        displayedStatus = status
     }
 
     @objc private func refreshNow() {
