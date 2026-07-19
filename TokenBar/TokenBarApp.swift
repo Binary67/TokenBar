@@ -267,16 +267,22 @@ private struct SubscriptionValueView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("Plan value")
                 .font(.caption.weight(.medium))
-            HStack(alignment: .firstTextBaseline) {
-                Text("\(UsageValueFormatter.multiple(valueMultiple)) plan cost")
-                    .font(.caption.weight(.medium))
-                    .monospacedDigit()
+            HStack {
+                Text("Value multiple")
                 Spacer()
-                Text("Estimated break-even · \(breakEvenDuration)")
-                    .font(.caption)
+                Text("\(UsageValueFormatter.multiple(valueMultiple)) plan cost")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
+            .font(.caption)
+            HStack {
+                Text("Estimated break-even")
+                Spacer()
+                Text(breakEvenDuration)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .font(.caption)
         }
         .help(
             "Compares the last 30 days of estimated API-equivalent usage with the plan price. "
