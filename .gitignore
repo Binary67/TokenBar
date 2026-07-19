@@ -5,6 +5,7 @@
 DerivedData/
 xcuserdata/
 *.xcuserstate
+/TokenBar.app/
 
 # Local credentials
 .env
