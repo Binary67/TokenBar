@@ -211,7 +211,7 @@ private struct UsageOverviewView: View {
                     isAvailable: snapshot.status != .unavailable
                 )
                 UsagePeriodColumn(
-                    title: "Last 30 days",
+                    title: "Last 30 Days",
                     cost: snapshot.last30DaysAPICostUSD,
                     tokens: snapshot.last30DaysTokens,
                     isAvailable: snapshot.status != .unavailable
@@ -222,11 +222,15 @@ private struct UsageOverviewView: View {
 
             Divider()
 
+            ProductivityView(snapshot: snapshot)
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 7) {
-                Text("Usage limits")
+                Text("Usage Limits")
                     .font(.caption.weight(.medium))
                 RateLimitRow(
-                    label: "5-hour",
+                    label: "5-Hour",
                     window: snapshot.fiveHourLimit,
                     includesDate: false
                 )
@@ -265,10 +269,10 @@ private struct SubscriptionValueView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Plan value")
+            Text("Plan Value")
                 .font(.caption.weight(.medium))
             HStack {
-                Text("Value multiple")
+                Text("Value Multiple")
                 Spacer()
                 Text("\(UsageValueFormatter.multiple(valueMultiple)) plan cost")
                     .foregroundStyle(.secondary)
@@ -276,7 +280,7 @@ private struct SubscriptionValueView: View {
             }
             .font(.caption)
             HStack {
-                Text("Estimated break-even")
+                Text("Estimated Break-Even")
                 Spacer()
                 Text(breakEvenDuration)
                     .foregroundStyle(.secondary)
@@ -296,6 +300,63 @@ private struct SubscriptionValueView: View {
     }
 }
 
+private struct ProductivityView: View {
+    let snapshot: TokenBarSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Productivity")
+                .font(.caption.weight(.medium))
+            ProductivityRow(
+                label: "Threads Started",
+                detail: threadDetail
+            )
+            ProductivityRow(
+                label: "Agent Time",
+                detail: agentTimeDetail
+            )
+            .help(
+                "Total Codex runtime, not estimated human time saved. "
+                    + "Parallel agents are counted separately, and finished runs include "
+                    + "completed, interrupted, and failed work."
+            )
+        }
+    }
+
+    private var threadDetail: String {
+        guard let today = snapshot.todayThreadsStarted,
+              let last30Days = snapshot.last30DaysThreadsStarted else {
+            return "Not reported"
+        }
+        return "\(today) today · \(last30Days) / 30d"
+    }
+
+    private var agentTimeDetail: String {
+        guard let today = snapshot.todayAgentTimeMilliseconds,
+              let last30Days = snapshot.last30DaysAgentTimeMilliseconds else {
+            return "Not reported"
+        }
+        return "\(AgentTimeFormatter.compact(today)) today · "
+            + "\(AgentTimeFormatter.compact(last30Days)) / 30d"
+    }
+}
+
+private struct ProductivityRow: View {
+    let label: String
+    let detail: String
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(detail)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .font(.caption)
+    }
+}
+
 private struct UsagePeriodColumn: View {
     let title: String
     let cost: Decimal?
@@ -304,10 +365,9 @@ private struct UsagePeriodColumn: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title.uppercased())
+            Text(title)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .tracking(0.4)
             Text(UsageValueFormatter.cost(cost))
                 .font(.title3.weight(.semibold))
                 .monospacedDigit()
@@ -334,7 +394,7 @@ private struct StackedUsageChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text("Daily tokens")
+                Text("Daily Tokens")
                     .font(.caption.weight(.medium))
                 Spacer()
                 Text(chartSummary)
@@ -373,7 +433,7 @@ private struct StackedUsageChart: View {
                 .frame(height: chartHeight, alignment: .bottom)
 
                 HStack {
-                    Text("30 days ago")
+                    Text("30 Days Ago")
                     Spacer()
                     Text("Today")
                 }

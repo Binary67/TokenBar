@@ -42,6 +42,10 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var last30DaysAPICostUSD: Decimal? = nil
     var dailyUsage: [CodexDailyUsage] = []
     var subscriptionPlan: CodexSubscriptionPlan? = nil
+    var todayThreadsStarted: Int? = nil
+    var last30DaysThreadsStarted: Int? = nil
+    var todayAgentTimeMilliseconds: Int64? = nil
+    var last30DaysAgentTimeMilliseconds: Int64? = nil
 
     var subscriptionValueMultiple: Decimal? {
         guard let last30DaysAPICostUSD, let subscriptionPlan else { return nil }
@@ -65,6 +69,20 @@ struct TokenBarSnapshot: Equatable, Sendable {
         var roundedEstimate = Decimal.zero
         NSDecimalRound(&roundedEstimate, &estimate, 0, .up)
         return max(1, NSDecimalNumber(decimal: roundedEstimate).intValue)
+    }
+}
+
+enum AgentTimeFormatter {
+    nonisolated static func compact(_ milliseconds: Int64) -> String {
+        guard milliseconds > 0 else { return "0m" }
+
+        let totalMinutes = Int((Double(milliseconds) / 60_000).rounded())
+        guard totalMinutes > 0 else { return "<1m" }
+        guard totalMinutes >= 60 else { return "\(totalMinutes)m" }
+
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
     }
 }
 
@@ -242,6 +260,7 @@ actor CodexMonitor {
         var trailingData = Data()
         var allTokensByDay = [Date: Int64]()
         var dailyUsage = [Date: CodexDailyUsage]()
+        var agentTimeMillisecondsByDay = [Date: Int64]()
         var currentModelID: String?
         var activeTurns = Set<String>()
         var latestTerminalEvent: TerminalEvent?
@@ -270,6 +289,7 @@ actor CodexMonitor {
         let version: Int
         let codexHomePath: String
         let timeZoneIdentifier: String
+        let dailyThreadCounts: [Date: Int]
         let files: [CachedSessionFile]
     }
 
@@ -333,6 +353,7 @@ actor CodexMonitor {
             let reason: String?
             let info: UsageInfo?
             let rateLimits: RateLimits?
+            let durationMilliseconds: Int64?
 
             enum CodingKeys: String, CodingKey {
                 case type
@@ -340,6 +361,7 @@ actor CodexMonitor {
                 case reason
                 case info
                 case rateLimits = "rate_limits"
+                case durationMilliseconds = "duration_ms"
             }
         }
 
@@ -407,6 +429,7 @@ actor CodexMonitor {
     private let timestampFormatter: ISO8601DateFormatter
     private let pollInterval: Duration
     private var fileStates = [URL: SessionFileState]()
+    private var dailyThreadCounts: [Date: Int]?
     private var monitoredDayStart: Date?
     private var monitoredTimeZoneIdentifier: String?
 
@@ -442,11 +465,14 @@ actor CodexMonitor {
         if monitoredTimeZoneIdentifier != nil,
            monitoredTimeZoneIdentifier != currentTimeZoneIdentifier {
             fileStates.removeAll(keepingCapacity: true)
+            dailyThreadCounts = nil
         }
-        if fileStates.isEmpty {
-            fileStates = loadCache()
+        if fileStates.isEmpty, dailyThreadCounts == nil {
+            let cache = loadCache()
+            fileStates = cache.fileStates
+            dailyThreadCounts = cache.dailyThreadCounts
         }
-        if !fileStates.isEmpty {
+        if !fileStates.isEmpty || dailyThreadCounts != nil {
             monitoredDayStart = Calendar.autoupdatingCurrent.startOfDay(for: cachedNow)
             monitoredTimeZoneIdentifier = currentTimeZoneIdentifier
             if clearStaleActiveTurns(before: cachedNow.addingTimeInterval(-30 * 60)) {
@@ -464,6 +490,7 @@ actor CodexMonitor {
                 let timeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
                 if monitoredTimeZoneIdentifier != timeZoneIdentifier {
                     fileStates.removeAll(keepingCapacity: true)
+                    dailyThreadCounts = nil
                     needsFullRefresh = true
                 } else if monitoredDayStart != dayStart {
                     needsFullRefresh = true
@@ -507,6 +534,7 @@ actor CodexMonitor {
         let historyInterval = DateInterval(start: historyStart, end: dayEnd)
         let activeLookback = now.addingTimeInterval(-30 * 60)
         let urls = try rolloutURLs(updatedSince: historyStart)
+        let updatedThreadCounts = try topLevelThreadCounts(createdSince: historyStart)
 
         let cachedFileCount = fileStates.count
         fileStates = fileStates.filter { urls.contains($0.key) }
@@ -514,6 +542,8 @@ actor CodexMonitor {
         monitoredTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
 
         var cacheChanged = fileStates.count != cachedFileCount
+            || dailyThreadCounts != updatedThreadCounts
+        dailyThreadCounts = updatedThreadCounts
         for url in urls {
             if try refreshFile(at: url, historyInterval: historyInterval) {
                 cacheChanged = true
@@ -559,8 +589,10 @@ actor CodexMonitor {
         let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? now
         let historyInterval = DateInterval(start: historyStart, end: dayEnd)
         let indexedURLs = try rolloutURLs(updatedSince: dayStart)
+        let updatedThreadCounts = try topLevelThreadCounts(createdSince: historyStart)
 
-        var cacheChanged = false
+        var cacheChanged = dailyThreadCounts != updatedThreadCounts
+        dailyThreadCounts = updatedThreadCounts
         for url in indexedURLs {
             if try refreshFile(at: url, historyInterval: historyInterval) {
                 cacheChanged = true
@@ -598,6 +630,23 @@ actor CodexMonitor {
         let last30DaysAPICostUSD = dailyUsage.reduce(Decimal.zero) { total, usage in
             total + usage.estimatedAPICostUSD
         }
+        var agentTimeByDay = Dictionary(uniqueKeysWithValues: days.map { ($0, Int64.zero) })
+        for state in fileStates.values {
+            for (day, duration) in state.agentTimeMillisecondsByDay
+            where agentTimeByDay[day] != nil {
+                agentTimeByDay[day, default: 0] += duration
+            }
+        }
+        let todayAgentTimeMilliseconds = agentTimeByDay[dayStart, default: 0]
+        let last30DaysAgentTimeMilliseconds = days.reduce(Int64.zero) { total, day in
+            total + agentTimeByDay[day, default: 0]
+        }
+        let todayThreadsStarted = dailyThreadCounts.map { counts in
+            counts[dayStart, default: 0]
+        }
+        let last30DaysThreadsStarted = dailyThreadCounts.map { counts in
+            days.reduce(0) { total, day in total + counts[day, default: 0] }
+        }
         let hasActiveTurn = fileStates.values.contains { !$0.activeTurns.isEmpty }
         let latestTerminalEvent = fileStates.values
             .compactMap(\.latestTerminalEvent)
@@ -632,7 +681,11 @@ actor CodexMonitor {
             last30DaysTokens: last30DaysTokens,
             last30DaysAPICostUSD: last30DaysAPICostUSD,
             dailyUsage: dailyUsage,
-            subscriptionPlan: subscriptionPlan
+            subscriptionPlan: subscriptionPlan,
+            todayThreadsStarted: todayThreadsStarted,
+            last30DaysThreadsStarted: last30DaysThreadsStarted,
+            todayAgentTimeMilliseconds: todayAgentTimeMilliseconds,
+            last30DaysAgentTimeMilliseconds: last30DaysAgentTimeMilliseconds
         )
     }
 
@@ -651,25 +704,32 @@ actor CodexMonitor {
         )
     }
 
-    private func loadCache() -> [URL: SessionFileState] {
+    private func loadCache() -> (
+        fileStates: [URL: SessionFileState],
+        dailyThreadCounts: [Date: Int]?
+    ) {
         guard let data = try? Data(contentsOf: cacheURL),
               let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
-              cache.version == 2,
+              cache.version == 3,
               cache.codexHomePath == codexHome.path,
               cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
-            return [:]
+            return ([:], nil)
         }
 
-        return Dictionary(uniqueKeysWithValues: cache.files.map { file in
-            (URL(fileURLWithPath: file.path), file.state)
-        })
+        return (
+            Dictionary(uniqueKeysWithValues: cache.files.map { file in
+                (URL(fileURLWithPath: file.path), file.state)
+            }),
+            cache.dailyThreadCounts
+        )
     }
 
     private func saveCache() {
         let cache = UsageCache(
-            version: 2,
+            version: 3,
             codexHomePath: codexHome.path,
             timeZoneIdentifier: TimeZone.autoupdatingCurrent.identifier,
+            dailyThreadCounts: dailyThreadCounts ?? [:],
             files: fileStates.map { url, state in
                 CachedSessionFile(path: url.path, state: state)
             }
@@ -688,10 +748,16 @@ actor CodexMonitor {
             guard var state = fileStates[url] else { continue }
             let tokenCount = state.allTokensByDay.count
             let usageCount = state.dailyUsage.count
+            let agentTimeCount = state.agentTimeMillisecondsByDay.count
             state.allTokensByDay = state.allTokensByDay.filter { $0.key >= historyStart }
             state.dailyUsage = state.dailyUsage.filter { $0.key >= historyStart }
+            state.agentTimeMillisecondsByDay = state.agentTimeMillisecondsByDay.filter {
+                $0.key >= historyStart
+            }
 
-            if state.allTokensByDay.count != tokenCount || state.dailyUsage.count != usageCount {
+            if state.allTokensByDay.count != tokenCount
+                || state.dailyUsage.count != usageCount
+                || state.agentTimeMillisecondsByDay.count != agentTimeCount {
                 fileStates[url] = state
                 changed = true
             }
@@ -744,6 +810,61 @@ actor CodexMonitor {
                 throw MonitorError.sqliteQueryFailed
             }
         }
+    }
+
+    private func topLevelThreadCounts(createdSince date: Date) throws -> [Date: Int] {
+        var database: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+
+        guard sqlite3_open_v2(databaseURL.path, &database, flags, nil) == SQLITE_OK,
+              let database else {
+            if let database {
+                sqlite3_close(database)
+            }
+            throw MonitorError.sqliteOpenFailed
+        }
+        defer { sqlite3_close(database) }
+
+        sqlite3_busy_timeout(database, 500)
+
+        let sql = "SELECT created_at_ms, source FROM threads WHERE created_at_ms >= ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            throw MonitorError.sqliteQueryFailed
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, Int64(date.timeIntervalSince1970 * 1_000))
+
+        var counts = [Date: Int]()
+        let calendar = Calendar.autoupdatingCurrent
+        while true {
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW:
+                guard let sourceValue = sqlite3_column_text(statement, 1) else { continue }
+                let source = String(cString: sourceValue)
+                guard !isSubagentSource(source) else { continue }
+
+                let createdAt = Date(
+                    timeIntervalSince1970: Double(sqlite3_column_int64(statement, 0)) / 1_000
+                )
+                counts[calendar.startOfDay(for: createdAt), default: 0] += 1
+            case SQLITE_DONE:
+                return counts
+            default:
+                throw MonitorError.sqliteQueryFailed
+            }
+        }
+    }
+
+    private func isSubagentSource(_ source: String) -> Bool {
+        guard let data = source.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let object = json as? [String: Any] else {
+            return false
+        }
+        return object["subagent"] != nil
     }
 
     @discardableResult
@@ -865,11 +986,23 @@ actor CodexMonitor {
         case "task_complete":
             guard let turnID = record.payload.turnID else { return }
             state.activeTurns.remove(turnID)
+            addAgentTime(
+                record.payload.durationMilliseconds,
+                endingAt: date,
+                historyInterval: historyInterval,
+                state: &state
+            )
             state.latestTerminalEvent = TerminalEvent(date: date, isError: false)
 
         case "turn_aborted":
             guard let turnID = record.payload.turnID else { return }
             state.activeTurns.remove(turnID)
+            addAgentTime(
+                record.payload.durationMilliseconds,
+                endingAt: date,
+                historyInterval: historyInterval,
+                state: &state
+            )
             state.latestTerminalEvent = TerminalEvent(
                 date: date,
                 isError: record.payload.reason != "interrupted"
@@ -877,6 +1010,32 @@ actor CodexMonitor {
 
         default:
             return
+        }
+    }
+
+    private func addAgentTime(
+        _ durationMilliseconds: Int64?,
+        endingAt end: Date,
+        historyInterval: DateInterval,
+        state: inout SessionFileState
+    ) {
+        guard let durationMilliseconds, durationMilliseconds > 0 else { return }
+
+        let start = end.addingTimeInterval(-Double(durationMilliseconds) / 1_000)
+        var segmentStart = max(start, historyInterval.start)
+        let intervalEnd = min(end, historyInterval.end)
+        guard segmentStart < intervalEnd else { return }
+
+        let calendar = Calendar.autoupdatingCurrent
+        while segmentStart < intervalEnd {
+            let day = calendar.startOfDay(for: segmentStart)
+            let nextDay = calendar.date(byAdding: .day, value: 1, to: day) ?? intervalEnd
+            let segmentEnd = min(nextDay, intervalEnd)
+            let segmentMilliseconds = Int64(
+                (segmentEnd.timeIntervalSince(segmentStart) * 1_000).rounded()
+            )
+            state.agentTimeMillisecondsByDay[day, default: 0] += segmentMilliseconds
+            segmentStart = segmentEnd
         }
     }
 

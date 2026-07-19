@@ -8,6 +8,7 @@ TokenBar is a lightweight macOS menu bar app for monitoring local Codex activity
 - Displays today's token count directly in the menu bar
 - Summarizes token usage and estimated API-equivalent cost for today and the last 30 days
 - Charts daily usage by supported model
+- Shows threads started and agent runtime for today and the last 30 days
 - Reports five-hour and weekly usage limits when Codex provides them
 - Identifies Pro 5× and Pro 20× plans and shows 30-day subscription value
 - Refreshes automatically every two seconds, with a manual refresh option

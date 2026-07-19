@@ -13,6 +13,11 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(TokenTextFormatter.compact(12_400_000), "12.4M")
         XCTAssertEqual(TokenTextFormatter.compact(128_000_000), "128M")
         XCTAssertEqual(TokenTextFormatter.exact(12_438_219), "12,438,219")
+        XCTAssertEqual(AgentTimeFormatter.compact(0), "0m")
+        XCTAssertEqual(AgentTimeFormatter.compact(20_000), "<1m")
+        XCTAssertEqual(AgentTimeFormatter.compact(42 * 60_000), "42m")
+        XCTAssertEqual(AgentTimeFormatter.compact(3 * 3_600_000 + 42 * 60_000), "3h 42m")
+        XCTAssertEqual(AgentTimeFormatter.compact(87 * 3_600_000), "87h")
     }
 
     func testPercentLeftIsClampedAndRounded() {
@@ -128,6 +133,82 @@ final class CodexMonitorTests: XCTestCase {
             XCTAssertEqual(snapshot.dailyUsage.count, 30)
             XCTAssertEqual(try apiCost(from: snapshot), testCase.expectedCost, accuracy: 0.000_000_001)
         }
+    }
+
+    func testBuildsProductivityMetricsAndExcludesSubagentThreads() async throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: Date())
+        let fiveDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -5, to: today))
+        let home = try makeCodexHome(
+            records: [
+                taskRecord(
+                    type: "task_complete",
+                    turnID: "today-complete",
+                    at: today.addingTimeInterval(6 * 3_600),
+                    durationMilliseconds: 3_600_000
+                ),
+                taskRecord(
+                    type: "turn_aborted",
+                    turnID: "today-interrupted",
+                    at: today.addingTimeInterval(7 * 3_600),
+                    reason: "interrupted",
+                    durationMilliseconds: 1_800_000
+                ),
+            ],
+            additionalSessions: [
+                [
+                    taskRecord(
+                        type: "task_complete",
+                        turnID: "older-complete",
+                        at: fiveDaysAgo.addingTimeInterval(6 * 3_600),
+                        durationMilliseconds: 7_200_000
+                    ),
+                ],
+                [
+                    taskRecord(
+                        type: "task_complete",
+                        turnID: "subagent-complete",
+                        at: today.addingTimeInterval(8 * 3_600),
+                        durationMilliseconds: 2_700_000
+                    ),
+                ],
+            ],
+            threadCreatedAt: [
+                today.addingTimeInterval(60),
+                fiveDaysAgo.addingTimeInterval(60),
+                today.addingTimeInterval(120),
+            ],
+            threadSources: [
+                "vscode",
+                "cli",
+                #"{"subagent":{"other":"test"}}"#,
+            ]
+        )
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.todayThreadsStarted, 1)
+        XCTAssertEqual(snapshot.last30DaysThreadsStarted, 2)
+        XCTAssertEqual(snapshot.todayAgentTimeMilliseconds, 8_100_000)
+        XCTAssertEqual(snapshot.last30DaysAgentTimeMilliseconds, 15_300_000)
+    }
+
+    func testSplitsAgentTimeAcrossLocalDays() async throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: Date())
+        let home = try makeCodexHome(records: [
+            taskRecord(
+                type: "task_complete",
+                turnID: "overnight",
+                at: today.addingTimeInterval(30 * 60),
+                durationMilliseconds: 3_600_000
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.todayAgentTimeMilliseconds, 1_800_000)
+        XCTAssertEqual(snapshot.last30DaysAgentTimeMilliseconds, 3_600_000)
     }
 
     func testBuildsThirtyLocalDayModelHistory() async throws {
@@ -564,6 +645,12 @@ final class CodexMonitorTests: XCTestCase {
         let home = try makeCodexHome(records: [
             modelRecord("gpt-5.6-sol", at: now),
             tokenRecord(at: now.addingTimeInterval(1), tokens: 250),
+            taskRecord(
+                type: "task_complete",
+                turnID: "cached-complete",
+                at: now.addingTimeInterval(2),
+                durationMilliseconds: 600_000
+            ),
         ])
 
         let initial = await firstSnapshot(from: makeMonitor(codexHome: home))
@@ -576,6 +663,10 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(cached.trackedTodayTokens, 250)
         XCTAssertEqual(cached.last30DaysTokens, 250)
         XCTAssertNotNil(cached.estimatedAPICostUSD)
+        XCTAssertEqual(cached.todayThreadsStarted, 1)
+        XCTAssertEqual(cached.last30DaysThreadsStarted, 1)
+        XCTAssertEqual(cached.todayAgentTimeMilliseconds, 600_000)
+        XCTAssertEqual(cached.last30DaysAgentTimeMilliseconds, 600_000)
     }
 
     func testRefreshFailureDoesNotReplaceLastSnapshot() async throws {
@@ -656,7 +747,9 @@ final class CodexMonitorTests: XCTestCase {
 
     private func makeCodexHome(
         records: [Data],
-        additionalSessions: [[Data]] = []
+        additionalSessions: [[Data]] = [],
+        threadCreatedAt: [Date]? = nil,
+        threadSources: [String]? = nil
     ) throws -> URL {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -666,6 +759,12 @@ final class CodexMonitorTests: XCTestCase {
 
         let rolloutURL = sessions.appendingPathComponent("rollout.jsonl")
         let allSessions = [records] + additionalSessions
+        let creationDates = threadCreatedAt
+            ?? Array(repeating: Date(), count: allSessions.count)
+        let sources = threadSources
+            ?? Array(repeating: "vscode", count: allSessions.count)
+        XCTAssertEqual(creationDates.count, allSessions.count)
+        XCTAssertEqual(sources.count, allSessions.count)
         let rolloutURLs = try allSessions.enumerated().map { index, sessionRecords in
             let url = index == 0
                 ? rolloutURL
@@ -687,7 +786,14 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(
             sqlite3_exec(
                 database,
-                "CREATE TABLE threads (rollout_path TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)",
+                """
+                CREATE TABLE threads (
+                    rollout_path TEXT NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """,
                 nil,
                 nil,
                 nil
@@ -699,7 +805,10 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(
             sqlite3_prepare_v2(
                 database,
-                "INSERT INTO threads (rollout_path, updated_at_ms) VALUES (?, ?)",
+                """
+                INSERT INTO threads (rollout_path, updated_at_ms, created_at_ms, source)
+                VALUES (?, ?, ?, ?)
+                """,
                 -1,
                 &statement,
                 nil
@@ -710,11 +819,17 @@ final class CodexMonitorTests: XCTestCase {
         defer { sqlite3_finalize(statement) }
 
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        for url in rolloutURLs {
+        for (index, url) in rolloutURLs.enumerated() {
             sqlite3_reset(statement)
             sqlite3_clear_bindings(statement)
             sqlite3_bind_text(statement, 1, url.path, -1, transient)
             sqlite3_bind_int64(statement, 2, Int64(Date().timeIntervalSince1970 * 1_000))
+            sqlite3_bind_int64(
+                statement,
+                3,
+                Int64(creationDates[index].timeIntervalSince1970 * 1_000)
+            )
+            sqlite3_bind_text(statement, 4, sources[index], -1, transient)
             XCTAssertEqual(sqlite3_step(statement), SQLITE_DONE)
         }
 
@@ -800,7 +915,8 @@ final class CodexMonitorTests: XCTestCase {
         type: String,
         turnID: String,
         at date: Date,
-        reason: String? = nil
+        reason: String? = nil,
+        durationMilliseconds: Int64? = nil
     ) -> Data {
         var payload: [String: Any] = [
             "type": type,
@@ -808,6 +924,9 @@ final class CodexMonitorTests: XCTestCase {
         ]
         if let reason {
             payload["reason"] = reason
+        }
+        if let durationMilliseconds {
+            payload["duration_ms"] = durationMilliseconds
         }
         return jsonLine([
             "timestamp": timestamp(date),
