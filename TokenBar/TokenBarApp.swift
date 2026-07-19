@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var usageOverviewHostingView: NSHostingView<UsageOverviewView>?
     private var monitoringTask: Task<Void, Never>?
     private var displayedStatus: CodexStatus?
-    private var snapshot = TokenBarSnapshot(status: .unavailable, todayTokens: 0, lastUpdated: .now)
+    private var snapshot = TokenBarSnapshot(status: .loading, todayTokens: 0, lastUpdated: .now)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -108,13 +108,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func apply(_ snapshot: TokenBarSnapshot) {
         self.snapshot = snapshot
 
-        let tokenText = snapshot.status == .unavailable
-            ? "—"
-            : TokenTextFormatter.compact(snapshot.todayTokens)
-        let exactTokenText = TokenTextFormatter.exact(snapshot.todayTokens)
-        let detail = snapshot.status == .unavailable
-            ? "Codex data unavailable"
-            : "\(snapshot.status.label) — \(exactTokenText) tokens today"
+        let tokenText: String
+        let detail: String
+        switch snapshot.status {
+        case .loading:
+            tokenText = "…"
+            detail = "Preparing Codex usage history"
+        case .unavailable:
+            tokenText = "—"
+            detail = "Codex data unavailable"
+        default:
+            tokenText = TokenTextFormatter.compact(snapshot.todayTokens)
+            detail = "\(snapshot.status.label) — "
+                + "\(TokenTextFormatter.exact(snapshot.todayTokens)) tokens today"
+        }
 
         statusItem.button?.attributedTitle = NSAttributedString(
             string: tokenText,
@@ -158,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         statusIconImageView.image = image
         statusIconImageView.removeAllSymbolEffects()
-        if status == .working {
+        if status == .loading || status == .working {
             statusIconImageView.addSymbolEffect(
                 .rotate.clockwise.wholeSymbol,
                 options: .repeat(.continuous)
@@ -203,51 +210,55 @@ private struct UsageOverviewView: View {
 
             Divider()
 
-            HStack(alignment: .top, spacing: 24) {
-                UsagePeriodColumn(
-                    title: "Today",
-                    cost: snapshot.estimatedAPICostUSD,
-                    tokens: snapshot.trackedTodayTokens,
-                    isAvailable: snapshot.status != .unavailable
-                )
-                UsagePeriodColumn(
-                    title: "Last 30 Days",
-                    cost: snapshot.last30DaysAPICostUSD,
-                    tokens: snapshot.last30DaysTokens,
-                    isAvailable: snapshot.status != .unavailable
-                )
-            }
+            if snapshot.status == .loading {
+                LoadingHistoryView()
+            } else {
+                HStack(alignment: .top, spacing: 24) {
+                    UsagePeriodColumn(
+                        title: "Today",
+                        cost: snapshot.estimatedAPICostUSD,
+                        tokens: snapshot.trackedTodayTokens,
+                        isAvailable: snapshot.status != .unavailable
+                    )
+                    UsagePeriodColumn(
+                        title: "Last 30 Days",
+                        cost: snapshot.last30DaysAPICostUSD,
+                        tokens: snapshot.last30DaysTokens,
+                        isAvailable: snapshot.status != .unavailable
+                    )
+                }
 
-            StackedUsageChart(days: snapshot.dailyUsage)
+                StackedUsageChart(days: snapshot.dailyUsage)
 
-            Divider()
-
-            ProductivityView(snapshot: snapshot)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Usage Limits")
-                    .font(.caption.weight(.medium))
-                RateLimitRow(
-                    label: "5-Hour",
-                    window: snapshot.fiveHourLimit,
-                    includesDate: false
-                )
-                RateLimitRow(
-                    label: "Weekly",
-                    window: snapshot.weeklyLimit,
-                    includesDate: true
-                )
-            }
-
-            if let valueMultiple = snapshot.subscriptionValueMultiple {
                 Divider()
 
-                SubscriptionValueView(
-                    valueMultiple: valueMultiple,
-                    estimatedBreakEvenDays: snapshot.estimatedBreakEvenDays
-                )
+                ProductivityView(snapshot: snapshot)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Usage Limits")
+                        .font(.caption.weight(.medium))
+                    RateLimitRow(
+                        label: "5-Hour",
+                        window: snapshot.fiveHourLimit,
+                        includesDate: false
+                    )
+                    RateLimitRow(
+                        label: "Weekly",
+                        window: snapshot.weeklyLimit,
+                        includesDate: true
+                    )
+                }
+
+                if let valueMultiple = snapshot.subscriptionValueMultiple {
+                    Divider()
+
+                    SubscriptionValueView(
+                        valueMultiple: valueMultiple,
+                        estimatedBreakEvenDays: snapshot.estimatedBreakEvenDays
+                    )
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -260,6 +271,24 @@ private struct UsageOverviewView: View {
     private var headerTitle: String {
         guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex" }
         return "Codex · \(subscriptionPlan.label)"
+    }
+}
+
+private struct LoadingHistoryView: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            VStack(spacing: 3) {
+                Text("Preparing usage history…")
+                    .font(.subheadline.weight(.medium))
+                Text("This may take a moment after an update.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 110)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -594,7 +623,7 @@ private extension CodexTrackedModel {
 private extension CodexStatus {
     var indicatorColor: Color {
         switch self {
-        case .working:
+        case .loading, .working:
             .blue
         case .idle:
             .secondary

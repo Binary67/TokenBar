@@ -7,6 +7,7 @@ import Foundation
 import SQLite3
 
 enum CodexStatus: String, Sendable {
+    case loading
     case working
     case idle
     case error
@@ -18,7 +19,7 @@ enum CodexStatus: String, Sendable {
 
     var symbolName: String {
         switch self {
-        case .working:
+        case .loading, .working:
             "arrow.triangle.2.circlepath"
         case .idle:
             "circle"
@@ -480,6 +481,10 @@ actor CodexMonitor {
             }
             await handler(makeSnapshot(now: cachedNow))
             hasPublishedSnapshot = true
+        } else {
+            await handler(
+                TokenBarSnapshot(status: .loading, todayTokens: 0, lastUpdated: cachedNow)
+            )
         }
 
         while !Task.isCancelled {

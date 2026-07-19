@@ -669,6 +669,18 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(cached.last30DaysAgentTimeMilliseconds, 600_000)
     }
 
+    func testPublishesLoadingBeforeInitialHistoryScan() async throws {
+        let home = try makeCodexHome(records: [])
+
+        let snapshot = await firstSnapshot(
+            from: makeMonitor(codexHome: home),
+            matching: { $0.status == .loading }
+        )
+
+        XCTAssertEqual(snapshot.status, .loading)
+        XCTAssertTrue(snapshot.dailyUsage.isEmpty)
+    }
+
     func testRefreshFailureDoesNotReplaceLastSnapshot() async throws {
         let now = Date()
         let home = try makeCodexHome(records: [
@@ -728,7 +740,9 @@ final class CodexMonitorTests: XCTestCase {
 
     private func firstSnapshot(
         from monitor: CodexMonitor,
-        matching predicate: @escaping @MainActor @Sendable (TokenBarSnapshot) -> Bool = { _ in true }
+        matching predicate: @escaping @MainActor @Sendable (TokenBarSnapshot) -> Bool = {
+            $0.status != .loading
+        }
     ) async -> TokenBarSnapshot {
         let received = expectation(description: "Snapshot received")
         var result: TokenBarSnapshot?
