@@ -9,6 +9,7 @@ TokenBar is a lightweight macOS menu bar app for monitoring local Codex activity
 - Summarizes token usage and estimated API-equivalent cost for today and the last 30 days
 - Charts daily usage by supported model
 - Reports five-hour and weekly usage limits when Codex provides them
+- Identifies Pro 5× and Pro 20× plans and shows 30-day subscription value
 - Refreshes automatically every two seconds, with a manual refresh option
 - Keeps a local usage-history cache for faster launches
 
@@ -54,6 +55,15 @@ Displayed costs are API-equivalent estimates, not charges from an OpenAI bill. E
 - `gpt-5.6-luna`
 
 Token usage from other models contributes to the menu bar's total for today but is excluded from model-specific history and cost estimates. Rates are defined in the source and may differ from current API pricing.
+
+## Subscription value
+
+When Codex reports a `prolite` or `pro` plan, TokenBar identifies it as Pro 5× or Pro 20× respectively. It compares the last 30 days of API-equivalent usage with the plan's current monthly price:
+
+- Pro 5× (`prolite`): $100 per month
+- Pro 20× (`pro`): $200 per month
+
+The resulting multiple is an estimate of API-equivalent value received, not a billing amount or guaranteed savings.
 
 ## Tests
 

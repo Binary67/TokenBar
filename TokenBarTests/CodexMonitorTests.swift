@@ -21,6 +21,37 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(CodexRateLimitWindow(usedPercent: 101, resetsAt: nil).percentLeft, 0)
     }
 
+    func testMapsProSubscriptionPlansAndCalculatesValueMultiple() throws {
+        let pro5x = try XCTUnwrap(CodexSubscriptionPlan(planType: "prolite"))
+        let pro20x = try XCTUnwrap(CodexSubscriptionPlan(planType: "pro"))
+
+        XCTAssertEqual(pro5x, .pro5x)
+        XCTAssertEqual(pro5x.label, "Pro 5×")
+        XCTAssertEqual(pro5x.monthlyPriceUSD, 100)
+        XCTAssertEqual(pro20x, .pro20x)
+        XCTAssertEqual(pro20x.label, "Pro 20×")
+        XCTAssertEqual(pro20x.monthlyPriceUSD, 200)
+        XCTAssertNil(CodexSubscriptionPlan(planType: "plus"))
+
+        let pro5xSnapshot = TokenBarSnapshot(
+            status: .idle,
+            todayTokens: 0,
+            lastUpdated: .now,
+            last30DaysAPICostUSD: 380,
+            subscriptionPlan: pro5x
+        )
+        let pro20xSnapshot = TokenBarSnapshot(
+            status: .idle,
+            todayTokens: 0,
+            lastUpdated: .now,
+            last30DaysAPICostUSD: 380,
+            subscriptionPlan: pro20x
+        )
+
+        XCTAssertEqual(pro5xSnapshot.subscriptionValueMultiple, 3.8)
+        XCTAssertEqual(pro20xSnapshot.subscriptionValueMultiple, 1.9)
+    }
+
     func testCalculatesStandardAPIEquivalentCostForSupportedModels() async throws {
         let cases = [
             (model: "gpt-5.6-sol", expectedCost: 0.005725),
@@ -199,6 +230,7 @@ final class CodexMonitorTests: XCTestCase {
                 at: now,
                 tokens: 500,
                 rateLimits: [
+                    "plan_type": "prolite",
                     "primary": rateLimitWindow(
                         usedPercent: 64,
                         resetsAt: weeklyReset,
@@ -217,6 +249,7 @@ final class CodexMonitorTests: XCTestCase {
         let fiveHourLimit = try XCTUnwrap(snapshot.fiveHourLimit)
         let weeklyLimit = try XCTUnwrap(snapshot.weeklyLimit)
 
+        XCTAssertEqual(snapshot.subscriptionPlan, .pro5x)
         XCTAssertEqual(fiveHourLimit.percentLeft, 82)
         XCTAssertEqual(
             try XCTUnwrap(fiveHourLimit.resetsAt).timeIntervalSince1970,
@@ -229,6 +262,26 @@ final class CodexMonitorTests: XCTestCase {
             weeklyReset.timeIntervalSince1970,
             accuracy: 0.001
         )
+    }
+
+    func testLatestReportedSubscriptionPlanWins() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            tokenRecord(
+                at: now,
+                tokens: 100,
+                rateLimits: ["plan_type": "prolite"]
+            ),
+            tokenRecord(
+                at: now.addingTimeInterval(1),
+                tokens: 100,
+                rateLimits: ["plan_type": "pro"]
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.subscriptionPlan, .pro20x)
     }
 
     func testCountsOnlyCurrentLocalDayAndReportsWorking() async throws {
@@ -428,7 +481,11 @@ final class CodexMonitorTests: XCTestCase {
         let now = Date()
         let home = try makeCodexHome(records: [
             modelRecord("gpt-5.6-sol", at: now),
-            tokenRecord(at: now.addingTimeInterval(1), tokens: 100),
+            tokenRecord(
+                at: now.addingTimeInterval(1),
+                tokens: 100,
+                rateLimits: ["plan_type": "prolite"]
+            ),
         ])
         let rolloutURL = home.appendingPathComponent("sessions/rollout.jsonl")
 
@@ -445,6 +502,9 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(initial.trackedTodayTokens, 100)
         XCTAssertEqual(updated.trackedTodayTokens, 300)
         XCTAssertEqual(unchanged.trackedTodayTokens, 300)
+        XCTAssertEqual(initial.subscriptionPlan, .pro5x)
+        XCTAssertEqual(updated.subscriptionPlan, .pro5x)
+        XCTAssertEqual(unchanged.subscriptionPlan, .pro5x)
         XCTAssertEqual(try apiCost(from: updated), 0.00083, accuracy: 0.000_000_001)
         XCTAssertEqual(try apiCost(from: unchanged), 0.00083, accuracy: 0.000_000_001)
     }

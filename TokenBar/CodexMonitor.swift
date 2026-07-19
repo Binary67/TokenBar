@@ -41,6 +41,46 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var last30DaysTokens: Int64 = 0
     var last30DaysAPICostUSD: Decimal? = nil
     var dailyUsage: [CodexDailyUsage] = []
+    var subscriptionPlan: CodexSubscriptionPlan? = nil
+
+    var subscriptionValueMultiple: Decimal? {
+        guard let last30DaysAPICostUSD, let subscriptionPlan else { return nil }
+        return last30DaysAPICostUSD / subscriptionPlan.monthlyPriceUSD
+    }
+}
+
+enum CodexSubscriptionPlan: Equatable, Sendable {
+    case pro5x
+    case pro20x
+
+    init?(planType: String) {
+        switch planType {
+        case "prolite":
+            self = .pro5x
+        case "pro":
+            self = .pro20x
+        default:
+            return nil
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .pro5x:
+            "Pro 5×"
+        case .pro20x:
+            "Pro 20×"
+        }
+    }
+
+    var monthlyPriceUSD: Decimal {
+        switch self {
+        case .pro5x:
+            100
+        case .pro20x:
+            200
+        }
+    }
 }
 
 enum CodexTrackedModel: String, CaseIterable, Codable, Sendable {
@@ -187,6 +227,7 @@ actor CodexMonitor {
         var activeTurns = Set<String>()
         var latestTerminalEvent: TerminalEvent?
         var latestRateLimits: RateLimitEvent?
+        var latestPlanType: PlanTypeEvent?
         var modificationDate: Date?
         var fileIdentifier: UInt64?
     }
@@ -199,6 +240,11 @@ actor CodexMonitor {
     private struct RateLimitEvent: Codable {
         let date: Date
         let snapshot: SessionRecord.RateLimits
+    }
+
+    private struct PlanTypeEvent: Codable {
+        let date: Date
+        let value: String
     }
 
     private struct UsageCache: Codable {
@@ -281,6 +327,13 @@ actor CodexMonitor {
         struct RateLimits: Codable {
             let primary: Window?
             let secondary: Window?
+            let planType: String?
+
+            enum CodingKeys: String, CodingKey {
+                case primary
+                case secondary
+                case planType = "plan_type"
+            }
 
             struct Window: Codable {
                 let usedPercent: Double
@@ -504,6 +557,10 @@ actor CodexMonitor {
             .compactMap(\.latestRateLimits)
             .max { $0.date < $1.date }?
             .snapshot
+        let subscriptionPlan = fileStates.values
+            .compactMap(\.latestPlanType)
+            .max { $0.date < $1.date }
+            .flatMap { CodexSubscriptionPlan(planType: $0.value) }
 
         let status: CodexStatus
         if hasActiveTurn {
@@ -524,7 +581,8 @@ actor CodexMonitor {
             trackedTodayTokens: todayUsage.totalTokens,
             last30DaysTokens: last30DaysTokens,
             last30DaysAPICostUSD: last30DaysAPICostUSD,
-            dailyUsage: dailyUsage
+            dailyUsage: dailyUsage,
+            subscriptionPlan: subscriptionPlan
         )
     }
 
@@ -546,7 +604,7 @@ actor CodexMonitor {
     private func loadCache() -> [URL: SessionFileState] {
         guard let data = try? Data(contentsOf: cacheURL),
               let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
-              cache.version == 1,
+              cache.version == 2,
               cache.codexHomePath == codexHome.path,
               cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
             return [:]
@@ -559,7 +617,7 @@ actor CodexMonitor {
 
     private func saveCache() {
         let cache = UsageCache(
-            version: 1,
+            version: 2,
             codexHomePath: codexHome.path,
             timeZoneIdentifier: TimeZone.autoupdatingCurrent.identifier,
             files: fileStates.map { url, state in
@@ -724,6 +782,9 @@ actor CodexMonitor {
         case "token_count":
             if let rateLimits = record.payload.rateLimits {
                 state.latestRateLimits = RateLimitEvent(date: date, snapshot: rateLimits)
+                if let planType = rateLimits.planType {
+                    state.latestPlanType = PlanTypeEvent(date: date, value: planType)
+                }
             }
 
             guard date >= historyInterval.start,

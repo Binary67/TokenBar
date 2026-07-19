@@ -188,7 +188,7 @@ private struct UsageOverviewView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Text("Codex Usage")
+                Text(headerTitle)
                     .font(.headline)
                 Spacer()
                 HStack(spacing: 5) {
@@ -236,12 +236,56 @@ private struct UsageOverviewView: View {
                     includesDate: true
                 )
             }
+
+            if let subscriptionPlan = snapshot.subscriptionPlan,
+               let valueMultiple = snapshot.subscriptionValueMultiple,
+               let last30DaysAPICostUSD = snapshot.last30DaysAPICostUSD {
+                Divider()
+
+                SubscriptionValueView(
+                    plan: subscriptionPlan,
+                    valueMultiple: valueMultiple,
+                    apiEquivalentValue: last30DaysAPICostUSD
+                )
+            }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
         .padding(.top, 10)
         .frame(width: 340, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var headerTitle: String {
+        guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex Usage" }
+        return "Codex Usage · \(subscriptionPlan.label)"
+    }
+}
+
+private struct SubscriptionValueView: View {
+    let plan: CodexSubscriptionPlan
+    let valueMultiple: Decimal
+    let apiEquivalentValue: Decimal
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Subscription value (last 30 days)")
+                .font(.caption.weight(.medium))
+            Text("\(UsageValueFormatter.multiple(valueMultiple)) value received")
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+            Text(
+                "\(UsageValueFormatter.cost(apiEquivalentValue)) API-equivalent usage"
+                    + " · \(UsageValueFormatter.monthlyPrice(plan.monthlyPriceUSD)) \(plan.label)"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+        }
+        .help(
+            "Compares the last 30 days of estimated API-equivalent usage "
+                + "with the monthly \(plan.label) price."
+        )
     }
 }
 
@@ -455,6 +499,22 @@ private enum UsageValueFormatter {
         guard let first = days.first?.day, let last = days.last?.day else { return "" }
         let style = Date.FormatStyle.dateTime.month(.abbreviated).day()
         return "\(first.formatted(style)) – \(last.formatted(style))"
+    }
+
+    static func multiple(_ value: Decimal) -> String {
+        value.formatted(
+            .number
+                .locale(Locale(identifier: "en_US_POSIX"))
+                .precision(.fractionLength(1))
+        ) + "×"
+    }
+
+    static func monthlyPrice(_ price: Decimal) -> String {
+        price.formatted(
+            .currency(code: "USD")
+                .locale(Locale(identifier: "en_US"))
+                .precision(.fractionLength(0))
+        )
     }
 }
 
