@@ -320,7 +320,8 @@ private struct StackedUsageChart: View {
         let date = hoveredDay.day.formatted(
             .dateTime.month(.abbreviated).day()
         )
-        return "\(date) · \(UsageValueFormatter.cost(hoveredDay.estimatedAPICostUSD))"
+        return "\(date) · \(TokenTextFormatter.compact(hoveredDay.totalTokens)) tokens · "
+            + UsageValueFormatter.cost(hoveredDay.estimatedAPICostUSD)
     }
 }
 
