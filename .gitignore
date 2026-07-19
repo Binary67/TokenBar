@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# Local credentials
+.env
+.env.*
+*.p12
+*.p8
