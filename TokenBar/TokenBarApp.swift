@@ -102,23 +102,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(usageValueItem)
         menu.addItem(.separator())
 
-        let refreshItem = NSMenuItem(
-            title: "Refresh Now",
+        let actionFooterHostingView = NSHostingView(
+            rootView: MenuActionFooterView(
+                refreshAction: { [weak self] in
+                    self?.statusItem.menu?.cancelTracking()
+                    self?.startMonitoring()
+                },
+                quitAction: { [weak self] in
+                    self?.statusItem.menu?.cancelTracking()
+                    NSApp.terminate(nil)
+                }
+            )
+        )
+        actionFooterHostingView.frame.size = actionFooterHostingView.fittingSize
+        let actionFooterItem = NSMenuItem()
+        actionFooterItem.view = actionFooterHostingView
+        menu.addItem(actionFooterItem)
+
+        let refreshShortcutItem = NSMenuItem(
+            title: "",
             action: #selector(refreshNow),
             keyEquivalent: "r"
         )
-        refreshItem.target = self
-        menu.addItem(refreshItem)
+        refreshShortcutItem.target = self
+        refreshShortcutItem.isHidden = true
+        refreshShortcutItem.allowsKeyEquivalentWhenHidden = true
+        menu.addItem(refreshShortcutItem)
 
-        menu.addItem(.separator())
-
-        let quitItem = NSMenuItem(
-            title: "Quit TokenBar",
+        let quitShortcutItem = NSMenuItem(
+            title: "",
             action: #selector(quit),
             keyEquivalent: "q"
         )
-        quitItem.target = self
-        menu.addItem(quitItem)
+        quitShortcutItem.target = self
+        quitShortcutItem.isHidden = true
+        quitShortcutItem.allowsKeyEquivalentWhenHidden = true
+        menu.addItem(quitShortcutItem)
 
         statusItem.menu = menu
         apply(snapshot)
@@ -233,6 +252,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+}
+
+private struct MenuActionFooterView: View {
+    let refreshAction: () -> Void
+    let quitAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Spacer()
+
+            Button(action: refreshAction) {
+                Label("Refresh Now", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+            }
+            .help("Refresh Now (⌘R)")
+            .accessibilityLabel("Refresh Now")
+
+            Button(action: quitAction) {
+                Label("Quit TokenBar", systemImage: "power")
+                    .labelStyle(.iconOnly)
+            }
+            .help("Quit TokenBar (⌘Q)")
+            .accessibilityLabel("Quit TokenBar")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(width: 340)
     }
 }
 
