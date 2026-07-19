@@ -24,6 +24,18 @@ final class CodexMonitorTests: XCTestCase {
     func testMapsProSubscriptionPlansAndCalculatesValueMetrics() throws {
         let pro5x = try XCTUnwrap(CodexSubscriptionPlan(planType: "prolite"))
         let pro20x = try XCTUnwrap(CodexSubscriptionPlan(planType: "pro"))
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: .now)
+        let thirtyDayHistory = (0..<30).compactMap { offset -> CodexDailyUsage? in
+            guard let day = calendar.date(byAdding: .day, value: offset - 29, to: today) else {
+                return nil
+            }
+            let cost: Decimal = offset == 0 ? 380 : 0
+            return CodexDailyUsage(
+                day: day,
+                sol: CodexModelUsage(tokens: 0, estimatedAPICostUSD: cost)
+            )
+        }
 
         XCTAssertEqual(pro5x, .pro5x)
         XCTAssertEqual(pro5x.label, "Pro 5×")
@@ -38,6 +50,7 @@ final class CodexMonitorTests: XCTestCase {
             todayTokens: 0,
             lastUpdated: .now,
             last30DaysAPICostUSD: 380,
+            dailyUsage: thirtyDayHistory,
             subscriptionPlan: pro5x
         )
         let pro20xSnapshot = TokenBarSnapshot(
@@ -45,6 +58,7 @@ final class CodexMonitorTests: XCTestCase {
             todayTokens: 0,
             lastUpdated: .now,
             last30DaysAPICostUSD: 380,
+            dailyUsage: thirtyDayHistory,
             subscriptionPlan: pro20x
         )
 
@@ -53,20 +67,33 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(pro5xSnapshot.estimatedBreakEvenDays, 8)
         XCTAssertEqual(pro20xSnapshot.estimatedBreakEvenDays, 16)
 
-        let estimatedSeventeenDaySnapshot = TokenBarSnapshot(
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: today))
+        let twoDayHistory = [
+            CodexDailyUsage(
+                day: yesterday,
+                sol: CodexModelUsage(tokens: 0, estimatedAPICostUSD: 90)
+            ),
+            CodexDailyUsage(
+                day: today,
+                sol: CodexModelUsage(tokens: 0, estimatedAPICostUSD: 84.32)
+            ),
+        ]
+        let estimatedTwoDaySnapshot = TokenBarSnapshot(
             status: .idle,
             todayTokens: 0,
             lastUpdated: .now,
             last30DaysAPICostUSD: 174.32,
+            dailyUsage: twoDayHistory,
             subscriptionPlan: pro5x
         )
-        XCTAssertEqual(estimatedSeventeenDaySnapshot.estimatedBreakEvenDays, 17)
+        XCTAssertEqual(estimatedTwoDaySnapshot.estimatedBreakEvenDays, 2)
 
         let inactiveSnapshot = TokenBarSnapshot(
             status: .idle,
             todayTokens: 0,
             lastUpdated: .now,
             last30DaysAPICostUSD: 0,
+            dailyUsage: thirtyDayHistory.map { CodexDailyUsage(day: $0.day) },
             subscriptionPlan: pro5x
         )
         XCTAssertNil(inactiveSnapshot.estimatedBreakEvenDays)

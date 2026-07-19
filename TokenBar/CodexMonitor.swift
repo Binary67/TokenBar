@@ -51,13 +51,19 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var estimatedBreakEvenDays: Int? {
         guard let last30DaysAPICostUSD,
               last30DaysAPICostUSD > 0,
+              let firstUsageIndex = dailyUsage.firstIndex(where: {
+                  $0.estimatedAPICostUSD > 0
+              }),
               let subscriptionPlan else {
             return nil
         }
 
-        var estimate = subscriptionPlan.monthlyPriceUSD * 30 / last30DaysAPICostUSD
+        let observedDays = dailyUsage.count - firstUsageIndex
+        var estimate = subscriptionPlan.monthlyPriceUSD
+            * Decimal(observedDays)
+            / last30DaysAPICostUSD
         var roundedEstimate = Decimal.zero
-        NSDecimalRound(&roundedEstimate, &estimate, 0, .plain)
+        NSDecimalRound(&roundedEstimate, &estimate, 0, .up)
         return max(1, NSDecimalNumber(decimal: roundedEstimate).intValue)
     }
 }

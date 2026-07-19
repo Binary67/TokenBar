@@ -280,7 +280,7 @@ private struct SubscriptionValueView: View {
         }
         .help(
             "Compares the last 30 days of estimated API-equivalent usage with the plan price. "
-                + "Break-even uses the average daily value over that period."
+                + "Break-even uses the daily average since the first tracked usage day in that period."
         )
     }
 
