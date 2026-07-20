@@ -172,14 +172,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + "\(TokenTextFormatter.exact(snapshot.todayTokens)) tokens today"
         }
 
+        var titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(
+                ofSize: NSFont.systemFontSize,
+                weight: .regular
+            )
+        ]
+        if isLoading {
+            titleAttributes[.baselineOffset] = 2
+        }
         statusItem.button?.attributedTitle = NSAttributedString(
             string: tokenText,
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(
-                    ofSize: NSFont.systemFontSize,
-                    weight: .regular
-                )
-            ]
+            attributes: titleAttributes
         )
         setStatusIcon(snapshot.status)
         statusItem.button?.toolTip = detail
