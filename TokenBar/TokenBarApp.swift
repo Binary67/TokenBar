@@ -333,12 +333,6 @@ private struct UsageOverviewView: View {
 
                 AccountUsageChart(days: snapshot.accountDailyUsage)
 
-                if snapshot.usageScope == .account {
-                    Text(costEstimateDetail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-
                 Divider()
 
                 VStack(alignment: .leading, spacing: 7) {
@@ -374,15 +368,6 @@ private struct UsageOverviewView: View {
     private var headerTitle: String {
         guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex" }
         return "Codex · \(subscriptionPlan.label)"
-    }
-
-    private var costEstimateDetail: String {
-        guard snapshot.costEstimateObservedDays > 0 else {
-            return "Account tokens · Cost unavailable until local Sol usage is observed"
-        }
-        let days = snapshot.costEstimateObservedDays
-        return "Account tokens · GPT-5.6 Sol assumed · Cost based on \(days) observed "
-            + (days == 1 ? "day" : "days")
     }
 }
 
