@@ -181,6 +181,8 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.trackedTodayTokens, 200)
         XCTAssertEqual(snapshot.accountDailyUsage.count, 30)
         XCTAssertEqual(snapshot.accountDailyUsage.last?.tokens, 30_000)
+        XCTAssertNotNil(snapshot.accountLastCheckedAt)
+        XCTAssertNotNil(snapshot.accountNextCheckAt)
         XCTAssertEqual(snapshot.accountDailyUsage.dropLast(3).map(\.tokens), Array(repeating: 0, count: 27))
         XCTAssertEqual(
             NSDecimalNumber(decimal: try XCTUnwrap(snapshot.estimatedAPICostUSD)).doubleValue,

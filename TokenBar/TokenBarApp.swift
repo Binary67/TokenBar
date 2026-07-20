@@ -333,6 +333,13 @@ private struct UsageOverviewView: View {
 
                 AccountUsageChart(days: snapshot.accountDailyUsage)
 
+                if snapshot.usageScope == .account {
+                    AccountRefreshStatusView(
+                        lastCheckedAt: snapshot.accountLastCheckedAt,
+                        nextCheckAt: snapshot.accountNextCheckAt
+                    )
+                }
+
                 Divider()
 
                 VStack(alignment: .leading, spacing: 7) {
@@ -368,6 +375,36 @@ private struct UsageOverviewView: View {
     private var headerTitle: String {
         guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex" }
         return "Codex · \(subscriptionPlan.label)"
+    }
+}
+
+private struct AccountRefreshStatusView: View {
+    let lastCheckedAt: Date?
+    let nextCheckAt: Date?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack {
+                Text(lastCheckedText(at: context.date))
+                Spacer()
+                Text(nextCheckText(at: context.date))
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+        }
+    }
+
+    private func lastCheckedText(at now: Date) -> String {
+        guard let lastCheckedAt else { return "Account not checked yet" }
+        let seconds = max(0, Int(now.timeIntervalSince(lastCheckedAt)))
+        return seconds < 1 ? "Account checked now" : "Account checked \(seconds)s ago"
+    }
+
+    private func nextCheckText(at now: Date) -> String {
+        guard let nextCheckAt else { return "Checking now" }
+        let seconds = max(0, Int(nextCheckAt.timeIntervalSince(now).rounded(.up)))
+        return seconds == 0 ? "Checking now" : "Next check in \(seconds)s"
     }
 }
 

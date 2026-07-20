@@ -68,6 +68,8 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var last30DaysThreadsStarted: Int? = nil
     var todayAgentTimeMilliseconds: Int64? = nil
     var last30DaysAgentTimeMilliseconds: Int64? = nil
+    var accountLastCheckedAt: Date? = nil
+    var accountNextCheckAt: Date? = nil
 
     var subscriptionValueMultiple: Decimal? {
         guard let last30DaysAPICostUSD, let subscriptionPlan else { return nil }
@@ -321,6 +323,7 @@ actor CodexMonitor {
         let dailyThreadCounts: [Date: Int]
         let files: [CachedSessionFile]
         let accountUsage: CodexAccountUsage?
+        let accountLastCheckedAt: Date?
     }
 
     private struct CachedSessionFile: Codable {
@@ -481,6 +484,8 @@ actor CodexMonitor {
     private var fileStates = [URL: SessionFileState]()
     private var dailyThreadCounts: [Date: Int]?
     private var accountUsage: CodexAccountUsage?
+    private var accountLastCheckedAt: Date?
+    private var accountNextCheckAt: Date?
     private var monitoredDayStart: Date?
     private var monitoredTimeZoneIdentifier: String?
 
@@ -523,6 +528,7 @@ actor CodexMonitor {
             fileStates = cache.fileStates
             dailyThreadCounts = cache.dailyThreadCounts
             accountUsage = cache.accountUsage
+            accountLastCheckedAt = cache.accountLastCheckedAt
         }
         if !fileStates.isEmpty || dailyThreadCounts != nil {
             monitoredDayStart = Calendar.autoupdatingCurrent.startOfDay(for: cachedNow)
@@ -607,13 +613,18 @@ actor CodexMonitor {
                 guard usage.dailyUsageBuckets != nil else {
                     throw MonitorError.accountUsageUnavailable
                 }
+                let checkedAt = Date()
                 accountUsage = usage
+                accountLastCheckedAt = checkedAt
+                accountNextCheckAt = checkedAt.addingTimeInterval(accountPollIntervalSeconds)
                 saveCache()
-                await handler(makeSnapshot(now: Date()))
+                await handler(makeSnapshot(now: checkedAt))
             } catch is CancellationError {
                 return
             } catch {
                 // Keep the last successful account response.
+                accountNextCheckAt = Date().addingTimeInterval(accountPollIntervalSeconds)
+                await handler(makeSnapshot(now: Date()))
             }
 
             do {
@@ -853,8 +864,16 @@ actor CodexMonitor {
             todayThreadsStarted: todayThreadsStarted,
             last30DaysThreadsStarted: last30DaysThreadsStarted,
             todayAgentTimeMilliseconds: todayAgentTimeMilliseconds,
-            last30DaysAgentTimeMilliseconds: last30DaysAgentTimeMilliseconds
+            last30DaysAgentTimeMilliseconds: last30DaysAgentTimeMilliseconds,
+            accountLastCheckedAt: accountLastCheckedAt,
+            accountNextCheckAt: accountNextCheckAt
         )
+    }
+
+    private var accountPollIntervalSeconds: TimeInterval {
+        let components = accountPollInterval.components
+        return TimeInterval(components.seconds)
+            + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }
 
     private func accountDateKey(for date: Date, calendar: Calendar) -> String {
@@ -885,14 +904,15 @@ actor CodexMonitor {
     private func loadCache() -> (
         fileStates: [URL: SessionFileState],
         dailyThreadCounts: [Date: Int]?,
-        accountUsage: CodexAccountUsage?
+        accountUsage: CodexAccountUsage?,
+        accountLastCheckedAt: Date?
     ) {
         guard let data = try? Data(contentsOf: cacheURL),
               let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
               cache.version == 5,
               cache.codexHomePath == codexHome.path,
               cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
-            return ([:], nil, nil)
+            return ([:], nil, nil, nil)
         }
 
         return (
@@ -900,7 +920,8 @@ actor CodexMonitor {
                 (URL(fileURLWithPath: file.path), file.state)
             }),
             cache.dailyThreadCounts,
-            cache.accountUsage
+            cache.accountUsage,
+            cache.accountLastCheckedAt
         )
     }
 
@@ -913,7 +934,8 @@ actor CodexMonitor {
             files: fileStates.map { url, state in
                 CachedSessionFile(path: url.path, state: state)
             },
-            accountUsage: accountUsage
+            accountUsage: accountUsage,
+            accountLastCheckedAt: accountLastCheckedAt
         )
 
         guard let data = try? JSONEncoder().encode(cache) else { return }
