@@ -558,9 +558,32 @@ private struct AccountUsageChart: View {
     @State private var hoveredDay: CodexAccountDailyUsage?
 
     private let chartHeight: CGFloat = 44
+    private let peakLineInset: CGFloat = 6
 
     private var maximumTokens: Int64 {
         days.map(\.tokens).max() ?? 0
+    }
+
+    private var peakDayIndex: Int? {
+        guard let index = days.indices.max(by: { days[$0].tokens < days[$1].tokens }),
+              days[index].tokens > 0 else {
+            return nil
+        }
+        return index
+    }
+
+    private var peakCost: Decimal? {
+        guard let peakDayIndex,
+              let cost = days[peakDayIndex].estimatedAPICostUSD,
+              cost > 0 else {
+            return nil
+        }
+        return cost
+    }
+
+    private var isPeakCostLeading: Bool {
+        guard let peakDayIndex else { return false }
+        return peakDayIndex * 2 > days.count - 1
     }
 
     var body: some View {
@@ -601,8 +624,39 @@ private struct AccountUsageChart: View {
                             }
                         }
                     }
+
+                    if let peakCost {
+                        HStack(spacing: 6) {
+                            if isPeakCostLeading {
+                                Text(UsageValueFormatter.compactCost(peakCost))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            HorizontalDashedLine()
+                                .stroke(
+                                    Color.secondary.opacity(0.45),
+                                    style: StrokeStyle(lineWidth: 1, dash: [3, 3])
+                                )
+                                .frame(height: 1)
+                            if !isPeakCostLeading {
+                                Text(UsageValueFormatter.compactCost(peakCost))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(
+                            "Peak API equivalent cost: \(UsageValueFormatter.cost(peakCost))"
+                        )
+                    }
                 }
-                .frame(height: chartHeight, alignment: .bottom)
+                .frame(
+                    height: chartHeight + (peakCost == nil ? 0 : peakLineInset),
+                    alignment: .bottom
+                )
 
                 HStack {
                     Text("30 Days Ago")
@@ -625,6 +679,16 @@ private struct AccountUsageChart: View {
         )
         return "\(date) · \(TokenTextFormatter.compact(hoveredDay.tokens)) tokens · "
             + UsageValueFormatter.cost(hoveredDay.estimatedAPICostUSD)
+    }
+}
+
+private struct HorizontalDashedLine: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            let y = rect.midY
+            path.move(to: CGPoint(x: rect.minX, y: y))
+            path.addLine(to: CGPoint(x: rect.maxX, y: y))
+        }
     }
 }
 
@@ -700,6 +764,37 @@ private enum UsageValueFormatter {
                 .locale(Locale(identifier: "en_US"))
                 .precision(.fractionLength(decimals))
         )
+    }
+
+    static func compactCost(_ cost: Decimal) -> String {
+        guard cost >= 1 else { return "<$1" }
+
+        let locale = Locale(identifier: "en_US")
+        if cost < 999.5 {
+            return cost.formatted(
+                .currency(code: "USD")
+                    .locale(locale)
+                    .precision(.fractionLength(0))
+            )
+        }
+
+        let divisor: Decimal
+        let suffix: String
+        if cost < 999_500 {
+            divisor = 1_000
+            suffix = "K"
+        } else {
+            divisor = 1_000_000
+            suffix = "M"
+        }
+        let scaledCost = cost / divisor
+        let maximumDecimals = scaledCost < 10 ? 1 : 0
+        let value = scaledCost.formatted(
+            .number
+                .locale(locale)
+                .precision(.fractionLength(0...maximumDecimals))
+        )
+        return "$\(value)\(suffix)"
     }
 
     static func dateRange(_ days: [Date]) -> String {
