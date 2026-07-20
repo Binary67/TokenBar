@@ -1,13 +1,13 @@
 # TokenBar
 
-TokenBar is a lightweight macOS menu bar app for monitoring local Codex activity and token usage. It reads Codex's local session data and keeps the current status and today's token count visible without opening the Codex app.
+TokenBar is a lightweight macOS menu bar app for monitoring Codex activity and account-wide token usage. It combines Codex account usage with this Mac's local session data, keeping the current status and today's token count visible without opening the Codex app.
 
 ## Features
 
 - Shows whether Codex is working, waiting for input, idle, unavailable, or ended with an error
-- Displays today's token count directly in the menu bar
-- Summarizes token usage and estimated API-equivalent cost for today and the last 30 days
-- Charts daily usage by supported model
+- Displays today's account-wide token count directly in the menu bar
+- Summarizes account-wide token usage and estimated API-equivalent cost for today and the last 30 days
+- Charts exact account-wide daily token totals
 - Shows threads started and agent runtime for today and the last 30 days
 - Reports five-hour and weekly usage limits when Codex provides them
 - Identifies Pro 5× and Pro 20× plans and shows 30-day subscription value
@@ -19,6 +19,7 @@ TokenBar is a lightweight macOS menu bar app for monitoring local Codex activity
 - macOS 26.5 or later
 - Xcode 26.6 or later to build from source
 - Codex with readable local data at `~/.codex`
+- Codex CLI installed at `/opt/homebrew/bin/codex` and signed in with ChatGPT
 
 TokenBar expects Codex's `state_5.sqlite` database and `sessions` directory to be present. If either is unavailable, the menu bar status is shown as unavailable.
 
@@ -39,23 +40,19 @@ TokenBar runs as a menu bar accessory, so it does not appear in the Dock. Click 
 
 ## How it works
 
-TokenBar reads Codex's local SQLite index and session rollout files. It incrementally processes new session records to determine activity, token usage, rate-limit windows, and model-specific usage. A 30-day cache is stored at:
+TokenBar calls Codex's authenticated `account/usage/read` app-server method for exact account-wide daily token totals. It also reads Codex's local SQLite index and session rollout files to determine this Mac's activity, rate-limit windows, agent runtime, and observed GPT-5.6 Sol cost per token. A 30-day cache is stored at:
 
 ```text
 ~/Library/Application Support/TokenBar/usage-history.json
 ```
 
-All monitoring and caching happen locally. TokenBar does not send usage data over the network.
+The account request is handled by the installed Codex app-server using the existing Codex login. TokenBar does not read authentication credentials or run its own synchronization service.
 
 ## Cost estimates
 
-Displayed costs are API-equivalent estimates, not charges from an OpenAI bill. Estimates currently cover these models:
+Displayed costs are API-equivalent estimates, not charges from an OpenAI bill. The account endpoint does not report model or input, output, and cache-token categories. TokenBar assumes account usage is GPT-5.6 Sol and applies the token-weighted effective Sol cost observed from every available local day in the last 30 days. This incorporates this Mac's observed regular input, cached input, cache-write input, and output mix without assuming zero cache.
 
-- `gpt-5.6-sol`
-- `gpt-5.6-terra`
-- `gpt-5.6-luna`
-
-Token usage from other models contributes to the menu bar's total for today but is excluded from model-specific history and cost estimates. Rates are defined in the source and may differ from current API pricing.
+The UI reports how many local Sol days informed the estimate. Account token totals remain exact; cost and subscription value remain estimates. Rates are defined in the source and may differ from current API pricing.
 
 ## Subscription value
 
@@ -83,8 +80,9 @@ The tests cover token formatting, cost calculations, daily history, status detec
 
 ```text
 TokenBar/
-├── TokenBarApp.swift       # Menu bar UI and application lifecycle
-└── CodexMonitor.swift      # Local Codex data monitoring and usage calculations
+├── CodexAccountUsageClient.swift # Authenticated account usage through app-server
+├── TokenBarApp.swift              # Menu bar UI and application lifecycle
+└── CodexMonitor.swift             # Local activity and combined usage calculations
 
 TokenBarTests/
 └── CodexMonitorTests.swift # Monitor and formatter tests

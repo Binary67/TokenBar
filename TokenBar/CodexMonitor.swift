@@ -34,6 +34,20 @@ enum CodexStatus: String, Sendable {
     }
 }
 
+enum CodexUsageScope: Equatable, Sendable {
+    case local
+    case account
+    case unavailable
+}
+
+struct CodexAccountDailyUsage: Equatable, Identifiable, Sendable {
+    let day: Date
+    let tokens: Int64
+    let estimatedAPICostUSD: Decimal?
+
+    nonisolated var id: Date { day }
+}
+
 struct TokenBarSnapshot: Equatable, Sendable {
     let status: CodexStatus
     let todayTokens: Int64
@@ -45,6 +59,10 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var last30DaysTokens: Int64 = 0
     var last30DaysAPICostUSD: Decimal? = nil
     var dailyUsage: [CodexDailyUsage] = []
+    var accountDailyUsage: [CodexAccountDailyUsage] = []
+    var usageScope: CodexUsageScope = .local
+    var costEstimateObservedDays: Int = 0
+    var usageValueObservedDays: Int? = nil
     var subscriptionPlan: CodexSubscriptionPlan? = nil
     var todayThreadsStarted: Int? = nil
     var last30DaysThreadsStarted: Int? = nil
@@ -59,14 +77,20 @@ struct TokenBarSnapshot: Equatable, Sendable {
     var estimatedBreakEvenDays: Int? {
         guard let last30DaysAPICostUSD,
               last30DaysAPICostUSD > 0,
-              let firstUsageIndex = dailyUsage.firstIndex(where: {
-                  $0.estimatedAPICostUSD > 0
-              }),
               let subscriptionPlan else {
             return nil
         }
 
-        let observedDays = dailyUsage.count - firstUsageIndex
+        let observedDays: Int
+        if let usageValueObservedDays {
+            observedDays = usageValueObservedDays
+        } else if let firstUsageIndex = dailyUsage.firstIndex(where: {
+            $0.estimatedAPICostUSD > 0
+        }) {
+            observedDays = dailyUsage.count - firstUsageIndex
+        } else {
+            return nil
+        }
         var estimate = subscriptionPlan.monthlyPriceUSD
             * Decimal(observedDays)
             / last30DaysAPICostUSD
@@ -94,7 +118,7 @@ enum CodexSubscriptionPlan: Equatable, Sendable {
     case pro5x
     case pro20x
 
-    init?(planType: String) {
+    nonisolated init?(planType: String) {
         switch planType {
         case "prolite":
             self = .pro5x
@@ -296,6 +320,7 @@ actor CodexMonitor {
         let timeZoneIdentifier: String
         let dailyThreadCounts: [Date: Int]
         let files: [CachedSessionFile]
+        let accountUsage: CodexAccountUsage?
     }
 
     private struct CachedSessionFile: Codable {
@@ -437,6 +462,7 @@ actor CodexMonitor {
     }
 
     private enum MonitorError: Error {
+        case accountUsageUnavailable
         case codexStorageUnavailable
         case sqliteOpenFailed
         case sqliteQueryFailed
@@ -450,8 +476,11 @@ actor CodexMonitor {
     private let decoder = JSONDecoder()
     private let timestampFormatter: ISO8601DateFormatter
     private let pollInterval: Duration
+    private let accountPollInterval: Duration
+    private let accountUsageClient: CodexAccountUsageClient?
     private var fileStates = [URL: SessionFileState]()
     private var dailyThreadCounts: [Date: Int]?
+    private var accountUsage: CodexAccountUsage?
     private var monitoredDayStart: Date?
     private var monitoredTimeZoneIdentifier: String?
 
@@ -460,11 +489,15 @@ actor CodexMonitor {
             .appendingPathComponent(".codex", isDirectory: true),
         fileManager: FileManager = .default,
         pollInterval: Duration = .seconds(2),
+        accountPollInterval: Duration = .seconds(60),
+        accountUsageClient: CodexAccountUsageClient? = .live(),
         cacheURL: URL? = nil
     ) {
         self.codexHome = codexHome
         self.fileManager = fileManager
         self.pollInterval = pollInterval
+        self.accountPollInterval = accountPollInterval
+        self.accountUsageClient = accountUsageClient
         databaseURL = codexHome.appendingPathComponent("state_5.sqlite")
         sessionsURL = codexHome.appendingPathComponent("sessions", isDirectory: true)
         self.cacheURL = cacheURL ?? fileManager
@@ -478,10 +511,6 @@ actor CodexMonitor {
     }
 
     func run(handler: @escaping SnapshotHandler) async {
-        var needsFullRefresh = true
-        var isColdLaunch = true
-        var hasPublishedSnapshot = false
-
         let cachedNow = Date()
         let currentTimeZoneIdentifier = TimeZone.autoupdatingCurrent.identifier
         if monitoredTimeZoneIdentifier != nil,
@@ -489,10 +518,11 @@ actor CodexMonitor {
             fileStates.removeAll(keepingCapacity: true)
             dailyThreadCounts = nil
         }
-        if fileStates.isEmpty, dailyThreadCounts == nil {
+        if fileStates.isEmpty, dailyThreadCounts == nil, accountUsage == nil {
             let cache = loadCache()
             fileStates = cache.fileStates
             dailyThreadCounts = cache.dailyThreadCounts
+            accountUsage = cache.accountUsage
         }
         if !fileStates.isEmpty || dailyThreadCounts != nil {
             monitoredDayStart = Calendar.autoupdatingCurrent.startOfDay(for: cachedNow)
@@ -501,12 +531,29 @@ actor CodexMonitor {
                 saveCache()
             }
             await handler(makeSnapshot(now: cachedNow))
-            hasPublishedSnapshot = true
         } else {
             await handler(
                 TokenBarSnapshot(status: .loading, todayTokens: 0, lastUpdated: cachedNow)
             )
         }
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await self.runLocalMonitor(handler: handler)
+            }
+            if accountUsageClient != nil {
+                group.addTask {
+                    await self.runAccountMonitor(handler: handler)
+                }
+            }
+            await group.waitForAll()
+        }
+    }
+
+    private func runLocalMonitor(handler: @escaping SnapshotHandler) async {
+        var needsFullRefresh = true
+        var isColdLaunch = true
+        var hasPublishedSnapshot = !fileStates.isEmpty || dailyThreadCounts != nil
 
         while !Task.isCancelled {
             let now = Date()
@@ -544,6 +591,33 @@ actor CodexMonitor {
 
             do {
                 try await Task.sleep(for: pollInterval)
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func runAccountMonitor(handler: @escaping SnapshotHandler) async {
+        guard let accountUsageClient else { return }
+
+        while !Task.isCancelled {
+            do {
+                let usage = try await accountUsageClient.fetch()
+                guard !Task.isCancelled else { return }
+                guard usage.dailyUsageBuckets != nil else {
+                    throw MonitorError.accountUsageUnavailable
+                }
+                accountUsage = usage
+                saveCache()
+                await handler(makeSnapshot(now: Date()))
+            } catch is CancellationError {
+                return
+            } catch {
+                // Keep the last successful account response.
+            }
+
+            do {
+                try await Task.sleep(for: accountPollInterval)
             } catch {
                 return
             }
@@ -640,9 +714,9 @@ actor CodexMonitor {
             uniqueKeysWithValues: days.map { ($0, CodexDailyUsage(day: $0)) }
         )
 
-        var totalTokens = Int64.zero
+        var localTodayTokens = Int64.zero
         for state in fileStates.values {
-            totalTokens += state.allTokensByDay[dayStart, default: 0]
+            localTodayTokens += state.allTokensByDay[dayStart, default: 0]
             for (day, usage) in state.dailyUsage where usageByDay[day] != nil {
                 usageByDay[day]?.add(usage)
             }
@@ -650,11 +724,72 @@ actor CodexMonitor {
 
         let dailyUsage = days.compactMap { usageByDay[$0] }
         let todayUsage = dailyUsage.last ?? CodexDailyUsage(day: dayStart)
-        let last30DaysTokens = dailyUsage.reduce(Int64.zero) { total, usage in
+        let localLast30DaysTokens = dailyUsage.reduce(Int64.zero) { total, usage in
             total + usage.totalTokens
         }
-        let last30DaysAPICostUSD = dailyUsage.reduce(Decimal.zero) { total, usage in
+        let localLast30DaysAPICostUSD = dailyUsage.reduce(Decimal.zero) { total, usage in
             total + usage.estimatedAPICostUSD
+        }
+        let observedSolDays = dailyUsage.count { $0.sol.tokens > 0 }
+        let observedSolTokens = dailyUsage.reduce(Int64.zero) { total, usage in
+            total + usage.sol.tokens
+        }
+        let observedSolCost = dailyUsage.reduce(Decimal.zero) { total, usage in
+            total + usage.sol.estimatedAPICostUSD
+        }
+        let observedSolRate = observedSolTokens > 0
+            ? observedSolCost / Decimal(observedSolTokens)
+            : nil
+
+        let usageScope: CodexUsageScope
+        let displayedTodayTokens: Int64
+        let displayedLast30DaysTokens: Int64
+        let displayedTodayCost: Decimal?
+        let displayedLast30DaysCost: Decimal?
+        let accountDailyUsage: [CodexAccountDailyUsage]
+        let usageValueObservedDays: Int?
+        if accountUsageClient == nil {
+            usageScope = .local
+            displayedTodayTokens = localTodayTokens
+            displayedLast30DaysTokens = localLast30DaysTokens
+            displayedTodayCost = todayUsage.estimatedAPICostUSD
+            displayedLast30DaysCost = localLast30DaysAPICostUSD
+            accountDailyUsage = []
+            usageValueObservedDays = nil
+        } else if let buckets = accountUsage?.dailyUsageBuckets {
+            var tokensByDay = [String: Int64]()
+            for bucket in buckets {
+                tokensByDay[bucket.startDate, default: 0] += bucket.tokens
+            }
+            accountDailyUsage = days.map { day in
+                let tokens = tokensByDay[accountDateKey(for: day, calendar: calendar), default: 0]
+                return CodexAccountDailyUsage(
+                    day: day,
+                    tokens: tokens,
+                    estimatedAPICostUSD: observedSolRate.map { Decimal(tokens) * $0 }
+                )
+            }
+            usageScope = .account
+            displayedTodayTokens = accountDailyUsage.last?.tokens ?? 0
+            displayedLast30DaysTokens = accountDailyUsage.reduce(Int64.zero) { total, usage in
+                total + usage.tokens
+            }
+            displayedTodayCost = accountDailyUsage.last?.estimatedAPICostUSD
+            displayedLast30DaysCost = observedSolRate.map { _ in
+                accountDailyUsage.reduce(Decimal.zero) { total, usage in
+                    total + (usage.estimatedAPICostUSD ?? 0)
+                }
+            }
+            usageValueObservedDays = accountDailyUsage.firstIndex(where: { $0.tokens > 0 })
+                .map { accountDailyUsage.count - $0 }
+        } else {
+            usageScope = .unavailable
+            displayedTodayTokens = 0
+            displayedLast30DaysTokens = 0
+            displayedTodayCost = nil
+            displayedLast30DaysCost = nil
+            accountDailyUsage = []
+            usageValueObservedDays = nil
         }
         var agentTimeByDay = Dictionary(uniqueKeysWithValues: days.map { ($0, Int64.zero) })
         for state in fileStates.values {
@@ -701,21 +836,35 @@ actor CodexMonitor {
 
         return TokenBarSnapshot(
             status: status,
-            todayTokens: totalTokens,
+            todayTokens: displayedTodayTokens,
             lastUpdated: now,
             fiveHourLimit: rateLimitWindow(durationMinutes: 300, in: latestRateLimits),
             weeklyLimit: rateLimitWindow(durationMinutes: 10_080, in: latestRateLimits),
-            estimatedAPICostUSD: todayUsage.estimatedAPICostUSD,
+            estimatedAPICostUSD: displayedTodayCost,
             trackedTodayTokens: todayUsage.totalTokens,
-            last30DaysTokens: last30DaysTokens,
-            last30DaysAPICostUSD: last30DaysAPICostUSD,
+            last30DaysTokens: displayedLast30DaysTokens,
+            last30DaysAPICostUSD: displayedLast30DaysCost,
             dailyUsage: dailyUsage,
+            accountDailyUsage: accountDailyUsage,
+            usageScope: usageScope,
+            costEstimateObservedDays: observedSolDays,
+            usageValueObservedDays: usageValueObservedDays,
             subscriptionPlan: subscriptionPlan,
             todayThreadsStarted: todayThreadsStarted,
             last30DaysThreadsStarted: last30DaysThreadsStarted,
             todayAgentTimeMilliseconds: todayAgentTimeMilliseconds,
             last30DaysAgentTimeMilliseconds: last30DaysAgentTimeMilliseconds
         )
+    }
+
+    private func accountDateKey(for date: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day else {
+            return ""
+        }
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     private func rateLimitWindow(
@@ -735,33 +884,36 @@ actor CodexMonitor {
 
     private func loadCache() -> (
         fileStates: [URL: SessionFileState],
-        dailyThreadCounts: [Date: Int]?
+        dailyThreadCounts: [Date: Int]?,
+        accountUsage: CodexAccountUsage?
     ) {
         guard let data = try? Data(contentsOf: cacheURL),
               let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
-              cache.version == 4,
+              cache.version == 5,
               cache.codexHomePath == codexHome.path,
               cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
-            return ([:], nil)
+            return ([:], nil, nil)
         }
 
         return (
             Dictionary(uniqueKeysWithValues: cache.files.map { file in
                 (URL(fileURLWithPath: file.path), file.state)
             }),
-            cache.dailyThreadCounts
+            cache.dailyThreadCounts,
+            cache.accountUsage
         )
     }
 
     private func saveCache() {
         let cache = UsageCache(
-            version: 4,
+            version: 5,
             codexHomePath: codexHome.path,
             timeZoneIdentifier: TimeZone.autoupdatingCurrent.identifier,
             dailyThreadCounts: dailyThreadCounts ?? [:],
             files: fileStates.map { url, state in
                 CachedSessionFile(path: url.path, state: state)
-            }
+            },
+            accountUsage: accountUsage
         )
 
         guard let data = try? JSONEncoder().encode(cache) else { return }

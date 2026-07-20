@@ -135,6 +135,132 @@ final class CodexMonitorTests: XCTestCase {
         }
     }
 
+    func testUsesAccountDailyTokensAndObservedSolRateForEstimatedCost() async throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: Date())
+        let yesterday = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: today))
+        let twoDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -2, to: today))
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: twoDaysAgo),
+            tokenRecord(
+                at: twoDaysAgo.addingTimeInterval(1),
+                inputTokens: 1_000,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+            tokenRecord(
+                at: yesterday.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 100,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+            tokenRecord(
+                at: today.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 100
+            ),
+        ])
+        let accountUsage = CodexAccountUsage(dailyUsageBuckets: [
+            .init(startDate: accountDateKey(twoDaysAgo), tokens: 10_000),
+            .init(startDate: accountDateKey(yesterday), tokens: 20_000),
+            .init(startDate: accountDateKey(today), tokens: 30_000),
+        ])
+        let client = CodexAccountUsageClient(fetch: { accountUsage })
+        let snapshot = await firstSnapshot(
+            from: makeMonitor(codexHome: home, accountUsageClient: client),
+            matching: { $0.usageScope == .account && $0.costEstimateObservedDays == 3 }
+        )
+
+        let expectedRate = Decimal(string: "0.00855")! / Decimal(1_300)
+        XCTAssertEqual(snapshot.todayTokens, 30_000)
+        XCTAssertEqual(snapshot.last30DaysTokens, 60_000)
+        XCTAssertEqual(snapshot.trackedTodayTokens, 200)
+        XCTAssertEqual(snapshot.accountDailyUsage.count, 30)
+        XCTAssertEqual(snapshot.accountDailyUsage.last?.tokens, 30_000)
+        XCTAssertEqual(snapshot.accountDailyUsage.dropLast(3).map(\.tokens), Array(repeating: 0, count: 27))
+        XCTAssertEqual(
+            NSDecimalNumber(decimal: try XCTUnwrap(snapshot.estimatedAPICostUSD)).doubleValue,
+            NSDecimalNumber(decimal: Decimal(30_000) * expectedRate).doubleValue,
+            accuracy: 0.000_000_001
+        )
+        XCTAssertEqual(
+            NSDecimalNumber(decimal: try XCTUnwrap(snapshot.last30DaysAPICostUSD)).doubleValue,
+            NSDecimalNumber(decimal: Decimal(60_000) * expectedRate).doubleValue,
+            accuracy: 0.000_000_001
+        )
+    }
+
+    func testAccountCostIsUnavailableWithoutObservedSolUsage() async throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: Date())
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-terra", at: today),
+            tokenRecord(
+                at: today.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+        ])
+        let accountUsage = CodexAccountUsage(dailyUsageBuckets: [
+            .init(startDate: accountDateKey(today), tokens: 5_000),
+        ])
+        let client = CodexAccountUsageClient(fetch: { accountUsage })
+        let snapshot = await firstSnapshot(
+            from: makeMonitor(codexHome: home, accountUsageClient: client),
+            matching: { $0.usageScope == .account && $0.dailyUsage.count == 30 }
+        )
+
+        XCTAssertEqual(snapshot.todayTokens, 5_000)
+        XCTAssertEqual(snapshot.costEstimateObservedDays, 0)
+        XCTAssertNil(snapshot.estimatedAPICostUSD)
+        XCTAssertNil(snapshot.last30DaysAPICostUSD)
+        XCTAssertNil(snapshot.subscriptionValueMultiple)
+    }
+
+    func testCachedAccountUsageSurvivesRefreshFailure() async throws {
+        let calendar = Calendar.autoupdatingCurrent
+        let today = calendar.startOfDay(for: Date())
+        let home = try makeCodexHome(records: [
+            modelRecord("gpt-5.6-sol", at: today),
+            tokenRecord(
+                at: today.addingTimeInterval(1),
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                cacheWriteInputTokens: 0,
+                outputTokens: 0
+            ),
+        ])
+        let usage = CodexAccountUsage(dailyUsageBuckets: [
+            .init(startDate: accountDateKey(today), tokens: 9_000),
+        ])
+        let initial = await firstSnapshot(
+            from: makeMonitor(
+                codexHome: home,
+                accountUsageClient: CodexAccountUsageClient(fetch: { usage })
+            ),
+            matching: { $0.usageScope == .account && $0.costEstimateObservedDays == 1 }
+        )
+        let cached = await firstSnapshot(
+            from: makeMonitor(
+                codexHome: home,
+                accountUsageClient: CodexAccountUsageClient(fetch: {
+                    throw FixtureError.accountUsage
+                })
+            ),
+            matching: { $0.usageScope == .account }
+        )
+
+        XCTAssertEqual(initial.todayTokens, 9_000)
+        XCTAssertEqual(cached.todayTokens, 9_000)
+        XCTAssertNotNil(cached.estimatedAPICostUSD)
+    }
+
     func testBuildsProductivityMetricsAndExcludesSubagentThreads() async throws {
         let calendar = Calendar.autoupdatingCurrent
         let today = calendar.startOfDay(for: Date())
@@ -771,11 +897,13 @@ final class CodexMonitorTests: XCTestCase {
 
     private func makeMonitor(
         codexHome: URL,
-        pollInterval: Duration = .seconds(2)
+        pollInterval: Duration = .seconds(2),
+        accountUsageClient: CodexAccountUsageClient? = nil
     ) -> CodexMonitor {
         CodexMonitor(
             codexHome: codexHome,
             pollInterval: pollInterval,
+            accountUsageClient: accountUsageClient,
             cacheURL: codexHome.appendingPathComponent("usage-history.json")
         )
     }
@@ -1026,7 +1154,21 @@ final class CodexMonitorTests: XCTestCase {
         return formatter.string(from: date)
     }
 
+    private func accountDateKey(_ date: Date) -> String {
+        let components = Calendar.autoupdatingCurrent.dateComponents(
+            [.year, .month, .day],
+            from: date
+        )
+        return String(
+            format: "%04d-%02d-%02d",
+            components.year ?? 0,
+            components.month ?? 0,
+            components.day ?? 0
+        )
+    }
+
     private enum FixtureError: Error {
+        case accountUsage
         case database
     }
 }

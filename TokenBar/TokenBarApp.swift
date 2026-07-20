@@ -160,14 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let tokenText: String
         let detail: String
-        switch snapshot.status {
-        case .loading:
+        if snapshot.status == .loading {
             tokenText = "…"
             detail = "Preparing Codex usage history"
-        case .unavailable:
+        } else if snapshot.usageScope == .unavailable {
             tokenText = "—"
-            detail = "Codex data unavailable"
-        default:
+            detail = "Codex account usage unavailable"
+        } else {
             tokenText = TokenTextFormatter.compact(snapshot.todayTokens)
             detail = "\(snapshot.status.label) — "
                 + "\(TokenTextFormatter.exact(snapshot.todayTokens)) tokens today"
@@ -189,15 +188,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             usageOverviewHostingView.frame.size = usageOverviewHostingView.fittingSize
         }
         if let agentTime = snapshot.todayAgentTimeMilliseconds {
-            agentActivityItem.title = "Agent Activity · \(AgentTimeFormatter.compact(agentTime)) Today"
+            agentActivityItem.title = "Agent Activity · This Mac · "
+                + "\(AgentTimeFormatter.compact(agentTime)) Today"
         } else {
-            agentActivityItem.title = "Agent Activity · Not Reported"
+            agentActivityItem.title = "Agent Activity · This Mac · Not Reported"
         }
         if let valueMultiple = snapshot.subscriptionValueMultiple {
-            usageValueItem.title = "Usage Value · "
+            usageValueItem.title = "Account Usage Value · "
                 + "\(UsageValueFormatter.multiple(valueMultiple)) Plan Price"
         } else {
-            usageValueItem.title = "Usage Value · Not Reported"
+            usageValueItem.title = "Account Usage Value · Not Reported"
         }
         if let agentActivityHostingView {
             agentActivityHostingView.rootView = AgentActivityDetailView(snapshot: snapshot)
@@ -316,18 +316,24 @@ private struct UsageOverviewView: View {
                     UsagePeriodColumn(
                         title: "Today",
                         cost: snapshot.estimatedAPICostUSD,
-                        tokens: snapshot.trackedTodayTokens,
-                        isAvailable: snapshot.status != .unavailable
+                        tokens: snapshot.todayTokens,
+                        isAvailable: snapshot.usageScope != .unavailable
                     )
                     UsagePeriodColumn(
                         title: "Last 30 Days",
                         cost: snapshot.last30DaysAPICostUSD,
                         tokens: snapshot.last30DaysTokens,
-                        isAvailable: snapshot.status != .unavailable
+                        isAvailable: snapshot.usageScope != .unavailable
                     )
                 }
 
-                StackedUsageChart(days: snapshot.dailyUsage)
+                AccountUsageChart(days: snapshot.accountDailyUsage)
+
+                if snapshot.usageScope == .account {
+                    Text(costEstimateDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 Divider()
 
@@ -365,6 +371,15 @@ private struct UsageOverviewView: View {
         guard let subscriptionPlan = snapshot.subscriptionPlan else { return "Codex" }
         return "Codex · \(subscriptionPlan.label)"
     }
+
+    private var costEstimateDetail: String {
+        guard snapshot.costEstimateObservedDays > 0 else {
+            return "Account tokens · Cost unavailable until local Sol usage is observed"
+        }
+        let days = snapshot.costEstimateObservedDays
+        return "Account tokens · GPT-5.6 Sol assumed · Cost based on \(days) observed "
+            + (days == 1 ? "day" : "days")
+    }
 }
 
 private struct LoadingHistoryView: View {
@@ -390,7 +405,7 @@ private struct AgentActivityDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Agent Activity")
+            Text("Agent Activity · This Mac")
                 .font(.headline)
 
             Divider()
@@ -456,11 +471,13 @@ private struct UsageValueDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text("Usage Value")
+            Text("Account Usage Value")
                 .font(.headline)
 
             Divider()
 
+            UsageDetailRow(label: "Usage Scope", detail: usageScopeDetail)
+            UsageDetailRow(label: "Cost Basis", detail: costBasisDetail)
             UsageDetailRow(label: "Value Multiple", detail: valueMultipleDetail)
             UsageDetailRow(label: "Estimated Break-Even", detail: breakEvenDuration)
         }
@@ -474,6 +491,16 @@ private struct UsageValueDetailView: View {
             return "Not Reported"
         }
         return "\(UsageValueFormatter.multiple(valueMultiple)) Plan Price"
+    }
+
+    private var usageScopeDetail: String {
+        snapshot.usageScope == .account ? "All Devices" : "Not Reported"
+    }
+
+    private var costBasisDetail: String {
+        let days = snapshot.costEstimateObservedDays
+        guard days > 0 else { return "Not Reported" }
+        return "Sol · \(days) observed \(days == 1 ? "day" : "days")"
     }
 
     private var breakEvenDuration: String {
@@ -522,20 +549,20 @@ private struct UsagePeriodColumn: View {
     }
 }
 
-private struct StackedUsageChart: View {
-    let days: [CodexDailyUsage]
-    @State private var hoveredDay: CodexDailyUsage?
+private struct AccountUsageChart: View {
+    let days: [CodexAccountDailyUsage]
+    @State private var hoveredDay: CodexAccountDailyUsage?
 
     private let chartHeight: CGFloat = 44
 
     private var maximumTokens: Int64 {
-        days.map(\.totalTokens).max() ?? 0
+        days.map(\.tokens).max() ?? 0
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
-                Text("Daily Tokens")
+                Text("Account Daily Tokens")
                     .font(.caption.weight(.medium))
                 Spacer()
                 Text(chartSummary)
@@ -556,7 +583,7 @@ private struct StackedUsageChart: View {
 
                     HStack(alignment: .bottom, spacing: 3) {
                         ForEach(days) { day in
-                            DailyUsageBar(
+                            AccountDailyUsageBar(
                                 usage: day,
                                 maximumTokens: maximumTokens,
                                 chartHeight: chartHeight,
@@ -581,85 +608,53 @@ private struct StackedUsageChart: View {
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
             }
-
-            HStack(spacing: 12) {
-                ForEach(CodexTrackedModel.allCases, id: \.rawValue) { model in
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(model.chartColor)
-                            .frame(width: 6, height: 6)
-                        Text(model.label)
-                    }
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
     }
 
     private var chartSummary: String {
         guard let hoveredDay else {
-            return UsageValueFormatter.dateRange(days)
+            return UsageValueFormatter.dateRange(days.map(\.day))
         }
 
         let date = hoveredDay.day.formatted(
             .dateTime.month(.abbreviated).day()
         )
-        return "\(date) · \(TokenTextFormatter.compact(hoveredDay.totalTokens)) tokens · "
+        return "\(date) · \(TokenTextFormatter.compact(hoveredDay.tokens)) tokens · "
             + UsageValueFormatter.cost(hoveredDay.estimatedAPICostUSD)
     }
 }
 
-private struct DailyUsageBar: View {
-    let usage: CodexDailyUsage
+private struct AccountDailyUsageBar: View {
+    let usage: CodexAccountDailyUsage
     let maximumTokens: Int64
     let chartHeight: CGFloat
     let isHovered: Bool
     let onHover: (Bool) -> Void
 
     private var barHeight: CGFloat {
-        guard maximumTokens > 0, usage.totalTokens > 0 else { return 0 }
-        return max(2, CGFloat(Double(usage.totalTokens) / Double(maximumTokens)) * chartHeight)
+        guard maximumTokens > 0, usage.tokens > 0 else { return 0 }
+        return max(2, CGFloat(Double(usage.tokens) / Double(maximumTokens)) * chartHeight)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ForEach(CodexTrackedModel.allCases, id: \.rawValue) { model in
-                let modelUsage = usage.usage(for: model)
-                model.chartColor
-                    .frame(
-                        height: usage.totalTokens == 0
-                            ? 0
-                            : barHeight * CGFloat(
-                                Double(modelUsage.tokens) / Double(usage.totalTokens)
-                            )
-                    )
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: barHeight, alignment: .bottom)
-        .clipShape(RoundedRectangle(cornerRadius: 2))
-        .brightness(isHovered ? 0.12 : 0)
-        .frame(height: chartHeight, alignment: .bottom)
-        .contentShape(Rectangle())
-        .onHover(perform: onHover)
-        .accessibilityLabel(tooltip)
+        CodexTrackedModel.sol.chartColor
+            .frame(maxWidth: .infinity)
+            .frame(height: barHeight, alignment: .bottom)
+            .clipShape(RoundedRectangle(cornerRadius: 2))
+            .brightness(isHovered ? 0.12 : 0)
+            .frame(height: chartHeight, alignment: .bottom)
+            .contentShape(Rectangle())
+            .onHover(perform: onHover)
+            .accessibilityLabel(tooltip)
     }
 
     private var tooltip: String {
-        var lines = [
+        [
             usage.day.formatted(date: .abbreviated, time: .omitted),
-            "Total: \(TokenTextFormatter.exact(usage.totalTokens)) tokens",
+            "Account total: \(TokenTextFormatter.exact(usage.tokens)) tokens",
             "API equivalent: \(UsageValueFormatter.cost(usage.estimatedAPICostUSD))",
         ]
-        for model in CodexTrackedModel.allCases {
-            let modelUsage = usage.usage(for: model)
-            lines.append(
-                "\(model.label): \(TokenTextFormatter.exact(modelUsage.tokens)) · "
-                    + UsageValueFormatter.cost(modelUsage.estimatedAPICostUSD)
-            )
-        }
-        return lines.joined(separator: "\n")
+        .joined(separator: "\n")
     }
 }
 
@@ -703,8 +698,8 @@ private enum UsageValueFormatter {
         )
     }
 
-    static func dateRange(_ days: [CodexDailyUsage]) -> String {
-        guard let first = days.first?.day, let last = days.last?.day else { return "" }
+    static func dateRange(_ days: [Date]) -> String {
+        guard let first = days.first, let last = days.last else { return "" }
         let style = Date.FormatStyle.dateTime.month(.abbreviated).day()
         return "\(first.formatted(style)) – \(last.formatted(style))"
     }
