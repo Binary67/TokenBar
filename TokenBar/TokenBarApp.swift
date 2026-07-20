@@ -154,6 +154,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func apply(_ snapshot: TokenBarSnapshot) {
         self.snapshot = snapshot
+        let isLoading = snapshot.status == .loading
+        agentActivityItem.isHidden = isLoading
+        usageValueItem.isHidden = isLoading
 
         let tokenText: String
         let detail: String
@@ -344,10 +347,12 @@ private struct UsageOverviewView: View {
                 }
             }
 
-            Divider()
+            if snapshot.status != .loading {
+                Divider()
 
-            Text("Activity & Value")
-                .font(.caption.weight(.medium))
+                Text("Activity & Value")
+                    .font(.caption.weight(.medium))
+            }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
@@ -732,6 +737,8 @@ private extension CodexStatus {
         switch self {
         case .loading, .working:
             .blue
+        case .needsInput:
+            .orange
         case .idle:
             .secondary
         case .error:

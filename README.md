@@ -4,7 +4,7 @@ TokenBar is a lightweight macOS menu bar app for monitoring local Codex activity
 
 ## Features
 
-- Shows whether Codex is working, idle, unavailable, or ended with an error
+- Shows whether Codex is working, waiting for input, idle, unavailable, or ended with an error
 - Displays today's token count directly in the menu bar
 - Summarizes token usage and estimated API-equivalent cost for today and the last 30 days
 - Charts daily usage by supported model

@@ -433,6 +433,48 @@ final class CodexMonitorTests: XCTestCase {
         XCTAssertEqual(try apiCost(from: snapshot), 0.000957, accuracy: 0.000_000_001)
     }
 
+    func testRequestUserInputReportsInputRequired() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            taskRecord(type: "task_started", turnID: "turn-1", at: now),
+            inputRequestRecord(callID: "call-1"),
+        ])
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.status, .needsInput)
+    }
+
+    func testRequestUserInputResponseRestoresWorking() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            taskRecord(type: "task_started", turnID: "turn-1", at: now),
+            inputRequestRecord(callID: "call-1"),
+            functionCallOutputRecord(callID: "call-1"),
+        ])
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.status, .working)
+    }
+
+    func testCompletedTurnClearsPendingInput() async throws {
+        let now = Date()
+        let home = try makeCodexHome(records: [
+            taskRecord(type: "task_started", turnID: "turn-1", at: now),
+            inputRequestRecord(callID: "call-1"),
+            taskRecord(
+                type: "task_complete",
+                turnID: "turn-1",
+                at: now.addingTimeInterval(1)
+            ),
+        ])
+
+        let snapshot = await firstSnapshot(from: makeMonitor(codexHome: home))
+
+        XCTAssertEqual(snapshot.status, .idle)
+    }
+
     func testInterruptedTurnIsIdleAndFailedTurnIsError() async throws {
         let now = Date()
         let interruptedHome = try makeCodexHome(records: [
@@ -946,6 +988,27 @@ final class CodexMonitorTests: XCTestCase {
             "timestamp": timestamp(date),
             "type": "event_msg",
             "payload": payload,
+        ])
+    }
+
+    private func inputRequestRecord(callID: String) -> Data {
+        jsonLine([
+            "type": "response_item",
+            "payload": [
+                "type": "function_call",
+                "name": "request_user_input",
+                "call_id": callID,
+            ],
+        ])
+    }
+
+    private func functionCallOutputRecord(callID: String) -> Data {
+        jsonLine([
+            "type": "response_item",
+            "payload": [
+                "type": "function_call_output",
+                "call_id": callID,
+            ],
         ])
     }
 

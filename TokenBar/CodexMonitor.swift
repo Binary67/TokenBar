@@ -9,6 +9,7 @@ import SQLite3
 enum CodexStatus: String, Sendable {
     case loading
     case working
+    case needsInput = "input required"
     case idle
     case error
     case unavailable
@@ -21,6 +22,8 @@ enum CodexStatus: String, Sendable {
         switch self {
         case .loading, .working:
             "arrow.triangle.2.circlepath"
+        case .needsInput:
+            "questionmark.bubble.fill"
         case .idle:
             "circle"
         case .error:
@@ -264,6 +267,7 @@ actor CodexMonitor {
         var agentTimeMillisecondsByDay = [Date: Int64]()
         var currentModelID: String?
         var activeTurns = Set<String>()
+        var pendingInputCallIDs = Set<String>()
         var latestTerminalEvent: TerminalEvent?
         var latestRateLimits: RateLimitEvent?
         var latestPlanType: PlanTypeEvent?
@@ -411,6 +415,23 @@ actor CodexMonitor {
                 case cacheWriteInputTokens = "cache_write_input_tokens"
                 case outputTokens = "output_tokens"
                 case totalTokens = "total_tokens"
+            }
+        }
+    }
+
+    private struct ResponseItemRecord: Decodable {
+        let type: String
+        let payload: Payload
+
+        struct Payload: Decodable {
+            let type: String
+            let name: String?
+            let callID: String?
+
+            enum CodingKeys: String, CodingKey {
+                case type
+                case name
+                case callID = "call_id"
             }
         }
     }
@@ -652,6 +673,7 @@ actor CodexMonitor {
         let last30DaysThreadsStarted = dailyThreadCounts.map { counts in
             days.reduce(0) { total, day in total + counts[day, default: 0] }
         }
+        let needsInput = fileStates.values.contains { !$0.pendingInputCallIDs.isEmpty }
         let hasActiveTurn = fileStates.values.contains { !$0.activeTurns.isEmpty }
         let latestTerminalEvent = fileStates.values
             .compactMap(\.latestTerminalEvent)
@@ -667,7 +689,9 @@ actor CodexMonitor {
             .flatMap { CodexSubscriptionPlan(planType: $0.value) }
 
         let status: CodexStatus
-        if hasActiveTurn {
+        if needsInput {
+            status = .needsInput
+        } else if hasActiveTurn {
             status = .working
         } else if latestTerminalEvent?.isError == true {
             status = .error
@@ -715,7 +739,7 @@ actor CodexMonitor {
     ) {
         guard let data = try? Data(contentsOf: cacheURL),
               let cache = try? JSONDecoder().decode(UsageCache.self, from: data),
-              cache.version == 3,
+              cache.version == 4,
               cache.codexHomePath == codexHome.path,
               cache.timeZoneIdentifier == TimeZone.autoupdatingCurrent.identifier else {
             return ([:], nil)
@@ -731,7 +755,7 @@ actor CodexMonitor {
 
     private func saveCache() {
         let cache = UsageCache(
-            version: 3,
+            version: 4,
             codexHomePath: codexHome.path,
             timeZoneIdentifier: TimeZone.autoupdatingCurrent.identifier,
             dailyThreadCounts: dailyThreadCounts ?? [:],
@@ -940,6 +964,19 @@ actor CodexMonitor {
         historyInterval: DateInterval,
         state: inout SessionFileState
     ) {
+        if line.range(of: Data(#""type":"response_item""#.utf8)) != nil,
+           let record = try? decoder.decode(ResponseItemRecord.self, from: line),
+           record.type == "response_item",
+           let callID = record.payload.callID {
+            if record.payload.type == "function_call",
+               record.payload.name == "request_user_input" {
+                state.pendingInputCallIDs.insert(callID)
+            } else if record.payload.type == "function_call_output" {
+                state.pendingInputCallIDs.remove(callID)
+            }
+            return
+        }
+
         if line.range(of: Data(#""type":"turn_context""#.utf8)) != nil,
            let record = try? decoder.decode(TurnContextRecord.self, from: line),
            record.type == "turn_context" {
@@ -991,6 +1028,7 @@ actor CodexMonitor {
         case "task_complete":
             guard let turnID = record.payload.turnID else { return }
             state.activeTurns.remove(turnID)
+            state.pendingInputCallIDs.removeAll()
             addAgentTime(
                 record.payload.durationMilliseconds,
                 endingAt: date,
@@ -1002,6 +1040,7 @@ actor CodexMonitor {
         case "turn_aborted":
             guard let turnID = record.payload.turnID else { return }
             state.activeTurns.remove(turnID)
+            state.pendingInputCallIDs.removeAll()
             addAgentTime(
                 record.payload.durationMilliseconds,
                 endingAt: date,
