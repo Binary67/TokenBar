@@ -780,11 +780,10 @@ private struct RateLimitRow: View {
 private enum UsageValueFormatter {
     static func cost(_ cost: Decimal?) -> String {
         guard let cost else { return "Not reported" }
-        let decimals = cost < 1 ? 4 : 2
         return cost.formatted(
             .currency(code: "USD")
                 .locale(Locale(identifier: "en_US"))
-                .precision(.fractionLength(decimals))
+                .precision(.fractionLength(2))
         )
     }
 
